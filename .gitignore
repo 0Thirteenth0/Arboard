@@ -1,0 +1,26 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# PyInstaller output
+build/
+dist/
+
+# Generated exports and scratch files
+out/
+output/
+.__*.tmp
+
+# Large local artwork/test assets
+*.pdf
+*.tif
+*.tiff
+*.jpg
+*.jpeg
+*.png
+
+# Keep documentation/placeholders inside log folders trackable
+!ai_logs/
+!ai_logs/**
+!*.md
+
