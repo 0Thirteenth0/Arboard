@@ -1,3 +1,4 @@
 PyMuPDF
 Pillow
 tkinterdnd2
+pywin32; platform_system == "Windows"

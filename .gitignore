@@ -9,9 +9,13 @@ dist/
 # Generated exports and scratch files
 out/
 output/
+test_outputs/
 .__*.tmp
+*.log
+logs/*.log*
 
 # Large local artwork/test assets
+*.ai
 *.pdf
 *.tif
 *.tiff
@@ -19,8 +23,17 @@ output/
 *.jpeg
 *.png
 
+# README/documentation screenshots
+!docs/
+!docs/**
+!docs/screenshots/
+!docs/screenshots/**
+!assets/
+!assets/**
+
 # Keep documentation/placeholders inside log folders trackable
 !ai_logs/
 !ai_logs/**
+!logs/
+!logs/.gitkeep
 !*.md
-

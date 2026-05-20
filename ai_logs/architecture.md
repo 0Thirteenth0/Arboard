@@ -2,3 +2,207 @@
 
 Track program structure, data flow, and module responsibilities here.
 
+## 2026-05-19 - Current architecture audit
+
+The current application is a single-file tkinter desktop app in `artboard_cutter_gui_advanced.py`.
+
+Current responsibilities inside that file:
+
+- UI construction and event handling.
+- File drag/drop and selection state.
+- Per-file parameter memory for width/height only.
+- Unit conversion.
+- Panel layout calculation.
+- Source file opening.
+- Raster export.
+- Vector export.
+- Preview rendering.
+- Theme styling.
+- GUI log output.
+
+The central behavior to preserve is `compute_panel_layout()`: outside-only bleed plus shared internal overlap. Preview, raster export, and vector export all call this same function today, which is good. The rebuild should preserve this as a dedicated engine function with tests.
+
+Main architectural issue: UI and export engine are tightly coupled. Export functions receive GUI-oriented callbacks, and preview/export math is repeated in different forms. The next architecture should split engine code from presentation code before changing behavior deeply.
+
+## 2026-05-19 - First modular structure
+
+Added `src/artboard_cutter_core/`:
+
+- `units.py`: point/mm conversion, scale helpers, pixel estimates, mm formatting.
+- `layout.py`: `PanelLayout`, width parsing, shared-overlap layout, preview height helper.
+- `pdf_io.py`: robust source opening, page box forcing, page box snapshots.
+- `raster_images.py`: PyMuPDF pixmap to Pillow conversion plus JPG/TIFF save helpers.
+- `raster_export.py`: raster panel export with DPI and megapixel cap behavior preserved.
+- `vector_export.py`: vector panel export using explicit logged crop rectangles and page box snapshots.
+- `export.py`: `ExportOptions` and file-level export orchestration.
+- `settings.py`: initial JSON settings model and load/save helpers.
+- `logging_config.py`: rotating JSON runtime logger.
+
+The current GUI still exists in `artboard_cutter_gui_advanced.py`, but now routes the preserved helper names to the engine. This keeps the app runnable while allowing future UI cleanup.
+
+## 2026-05-19 - Theme architecture
+
+Added centralized theme definitions in `src/artboard_cutter_core/themes.py`.
+
+Theme structure:
+
+- `Theme`: immutable dataclass with name, dark/light flag, and color tokens.
+- `THEMES`: built-in professional theme registry.
+- `THEME_NAMES`: ordered list for UI selectors.
+- `normalize_theme_name()`: maps legacy `dark`/`light` settings and invalid values to safe theme names.
+- `get_theme()`: returns the active theme object.
+
+Built-in themes:
+
+- Professional Dark
+- Professional Light
+- Graphite
+- Midnight
+- Neutral Gray
+- High Contrast
+- Soft Blue
+- Warm Dark
+
+Color tokens include core UI colors and preview-specific overlay tokens so preview readability is maintained per theme:
+
+- `preview_bg`
+- `preview_border`
+- `preview_panel`
+- `preview_content`
+- `preview_bleed`
+- `preview_overlap`
+- `preview_label_bg`
+- `preview_label_fg`
+
+Adding a new theme should only require adding one `Theme` entry with the full token set.
+
+## 2026-05-19 - Current Architecture Snapshot
+
+Current source of truth remains `artboard_cutter_gui_advanced.py`, with export/math functionality increasingly delegated into `src/artboard_cutter_core/`.
+
+Current structure:
+
+- `artboard_cutter_gui_advanced.py`: tkinter desktop shell, modern layout, preview canvas, file queue, settings controls, export status, activity log.
+- `src/artboard_cutter_core/layout.py`: panel layout source of truth, including outside-only bleed and shared overlap.
+- `src/artboard_cutter_core/export.py`: file-level export orchestration and `ExportOptions`.
+- `src/artboard_cutter_core/raster_export.py`: raster export path.
+- `src/artboard_cutter_core/vector_export.py`: vector PDF export path; GUI-facing vector behavior is now always stretch-to-fit.
+- `src/artboard_cutter_core/settings.py`: persisted app settings.
+- `src/artboard_cutter_core/profiles.py`: session-only queued artwork profile model.
+- `src/artboard_cutter_core/themes.py`: centralized professional theme definitions and preview overlay tokens.
+- `tests/`: layout, export geometry, settings, and theme tests.
+- `docs/testing.md`: local test notes, including GUI/Tcl skip behavior and visual diff artifact location.
+
+Important transitional state:
+
+- `artboard_cutter_gui_advanced.py` still contains legacy wrapper functions for compatibility, but the constructor dead branch has been removed.
+- `artboard_cutter_gui.py` and `artboard_cutter_gui_v1.py` remain deleted in the working tree from cleanup.
+
+## 2026-05-19 - ArtworkProfile state model
+
+`ArtworkProfile` is the session model for one queued artwork. It is intentionally not persisted to disk.
+
+Stored per-artwork fields:
+
+- file path and derived file name
+- editable output name
+- source page/artboard index
+- source page/artboard count
+- original artwork width and height
+- current panel widths and height
+- bleed and overlap
+- DPI
+- export format
+- export mode
+- vector preservation flag
+- vector fit mode, currently always `stretch`
+- output status
+- validation state
+- selected-for-processing state
+
+Global persisted fields remain in `AppSettings`: output folder, theme, last input path, last-used bleed/overlap/DPI/format/mode defaults, recent paths, and window geometry.
+
+The GUI saves the active row back into its profile before switching rows, before persisting global defaults, and before export. Selecting a row loads that row's profile into the settings panel and preview. Removing or clearing rows deletes the corresponding profiles from memory.
+
+Multi-page import behavior:
+
+- `create_artwork_profiles()` opens the source document and creates one profile per page/artboard.
+- Single-page files use the source filename stem as the queue/output name.
+- Multi-page files use the source filename stem plus 1-based page number, for example `Poster1`, `Poster2`, `Poster3`.
+- Export reads the profile's `source_page_index` so later pages are not silently ignored.
+- Export reads the profile's editable `output_name` as the output base name.
+- For `.ai` files on Windows, optional Illustrator COM integration can read real Illustrator artboard names when the user triggers `Get Names` from the queue group row.
+- Illustrator names are sanitized for filesystem-safe output names and duplicates are made unique.
+
+Queue grouping behavior:
+
+- Multi-page imports create a parent Treeview row named with the original filename.
+- Child rows under that parent are the actual exportable `ArtworkProfile` entries.
+- The parent row can be expanded/collapsed with the native Treeview arrow in the File Name column.
+- The Select column remains separate from the hierarchy and toggles parent/child processing state.
+- Single-page imports remain as direct leaf rows.
+- Parent row actions apply to the child profiles; export only iterates leaf profiles.
+
+Reset size behavior:
+
+- Reads `original_width_mm` and `original_height_mm` from the selected profile.
+- Writes those values into the profile's current panel widths and height.
+- Updates the visible fields and preview.
+- Does not touch any other queued artwork.
+
+Overlap behavior:
+
+- `compute_panel_layout()` is still the canonical layout function for preview, raster export, and vector export.
+- `Shared` overlap mode is the legacy behavior: each internal overlap is split equally across the neighboring panels.
+- `Left` overlap mode keeps each panel's right edge at its content edge unless it is the final outside-bleed edge. The next panel extends left by the full overlap amount.
+- `ArtworkProfile.overlap_mode` stores the per-queued-artwork mode for the current session.
+- `AppSettings.overlap_mode` stores only the last-used global default for the next launch.
+
+Settings persistence:
+
+- App settings are saved to `%LOCALAPPDATA%/ArtboardCutter/settings.json`.
+- Persisted global/default parameters now include `bleed_mm`, `overlap_mm`, `overlap_mode`, `dpi`, `export_format`, `export_mode`, output folder, theme, and window geometry.
+- Per-artwork queue settings still remain session-only in `ArtworkProfile` and are not written to AppData.
+- Older settings files that do not have `overlap_mode` load with the dataclass default `Shared`.
+
+Runtime log access:
+
+- Structured JSON logs are still written by `src/artboard_cutter_core/logging_config.py` under `logs/`.
+- The GUI Run panel includes `Open Logs Folder`, which creates the folder if needed and opens it with the platform file browser.
+- The app does not yet include an in-app log viewer; users inspect JSON logs in the opened folder.
+
+Compatibility wrappers:
+
+- `artboard_cutter_gui_advanced.py` keeps public wrapper functions for legacy callers and tests.
+- Those wrappers now delegate directly to the extracted core engine without retaining unreachable old function bodies.
+- New code should prefer importing from `src/artboard_cutter_core/` directly.
+
+Current validation boundary:
+
+- Geometry, export, profile, settings, theme contrast, Illustrator fallback, and wrapper delegation are covered by automated tests.
+- GUI launch, preview screenshots, and high-DPI scaling are represented by guarded tests but currently skip because local Tcl/Tk cannot create a root window.
+- Manual GUI validation should resume after the local Python/Tcl runtime is repaired.
+
+Build/icon packaging:
+
+- `assets/artboard_cutter.ico` is embedded as the Windows executable icon through PyInstaller.
+- The same icon is bundled as runtime data so tkinter can apply it to the app window when available.
+- `tools/generate_icon.py` regenerates the source PNG and multi-size ICO asset.
+- `build_exe.bat` regenerates the icon before running PyInstaller through `ArtboardCutter.spec`.
+- `ArtboardCutter.spec` is the single maintained PyInstaller spec.
+- Shortcuts should inherit the embedded executable icon; generated shortcuts can also set `IconLocation` to `ArtboardCutter.exe,0` explicitly.
+
+## 2026-05-19 - Test architecture additions
+
+Added shared test helpers in `tests/helpers.py`:
+
+- generated grid PDF fixture
+- generated color stripe PDF fixture
+- rotated PDF fixture
+- unusual CropBox/TrimBox/BleedBox fixture
+- PDF-to-RGB rendering helper
+- pixel diff statistics helper
+- PPM diff artifact writer
+- guarded Tk availability helper
+
+GUI tests intentionally skip instead of failing when Tk cannot create a root window. This keeps non-GUI CI stable while still allowing interactive smoke and preview snapshot validation to run automatically in a healthy Windows/Tk environment.
