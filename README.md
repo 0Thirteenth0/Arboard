@@ -10,7 +10,11 @@ It supports custom panel widths, outside-only bleed, shared or left-only overlap
 
 Vector export stretches the full artwork to the requested target size first, then clips each panel from that stretched master. This keeps raster and vector panel geometry aligned.
 
-![Exported panel outputs](docs/screenshots/output_panels.png)
+![Exported panels with outlines](docs/screenshots/output_panels_showing%20outline.png)
+
+![Combined output opened in Adobe Illustrator](docs/screenshots/output_combined_adobe_illustrator.png)
+
+![Queue output panel names](docs/screenshots/output_panel_names.png)
 
 ## Current Features
 
