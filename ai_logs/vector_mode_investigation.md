@@ -122,7 +122,7 @@ Open investigation items:
 
 - Confirm vector objects remain editable/selectable as expected in target production tools.
 - Continue manual preview/export visual equivalence checks in a working GUI runtime.
-- Confirm vector/raster alignment with customer artwork that includes linked raster assets and Illustrator-specific content.
+- Confirm vector/raster alignment with customer artwork that includes linked raster assets and Illustrator-specific contents.
 
 Latest status:
 
