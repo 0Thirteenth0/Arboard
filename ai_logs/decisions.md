@@ -155,3 +155,12 @@ Track product and implementation decisions here.
 - Use one maintained PyInstaller spec: `ArtboardCutter.spec`.
 - Remove the duplicate `artboard_cutter_gui_advanced.spec` to avoid two divergent build paths.
 - Keep generated `dist/` output out of Git; source, specs, icon assets, docs, tests, and AI logs are the tracked project state.
+
+## 2026-05-26 - Interactive preview editing model
+
+- Keep interactive panel edits as width edits, not per-edge overlap edits, because the export engine currently has one global overlap value and one list of panel widths.
+- Preserve total content width during an internal edge drag by increasing one adjacent panel width and decreasing the next adjacent panel width.
+- Treat only internal panel boundaries as draggable targets; outside bleed edges remain locked and non-interactive.
+- Add `Add Panel` by splitting the last existing width in half rather than resizing every panel. This keeps overall artwork size stable and makes the operation easy to reverse manually.
+- Keep the preview editor on the existing tkinter canvas for now, but cache transform and hit-target state so future interactive tools do not need to reverse-engineer canvas drawings.
+- Protect the configured overlap during mouse editing by rejecting drag results that would make either adjacent panel narrower than `overlap + 0.01 mm`. This prevents the layout engine from reducing effective overlap during interactive edits.

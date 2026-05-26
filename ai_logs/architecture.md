@@ -206,3 +206,28 @@ Added shared test helpers in `tests/helpers.py`:
 - guarded Tk availability helper
 
 GUI tests intentionally skip instead of failing when Tk cannot create a root window. This keeps non-GUI CI stable while still allowing interactive smoke and preview snapshot validation to run automatically in a healthy Windows/Tk environment.
+
+## 2026-05-26 - Interactive preview editor layer
+
+The tkinter canvas preview now keeps lightweight interaction state in addition to drawing the preview:
+
+- current canvas-to-millimeter transform
+- current preview page size
+- cached internal panel edge hit targets
+- active pan state
+- active internal-edge drag state
+
+The edit model remains intentionally narrow:
+
+- Panel geometry is still driven by `compute_panel_layout()`.
+- The editable source of truth is still the active `ArtworkProfile.panel_widths` string.
+- Interactive edge dragging updates adjacent panel widths while preserving total content width.
+- The global overlap value remains global; the editor does not introduce per-edge overlap state.
+- Outside bleed edges are not included in the hit-target cache, so they remain locked.
+
+Core panel-editing helpers now live in `src/artboard_cutter_core/layout.py`:
+
+- `split_last_panel_width()`
+- `resize_adjacent_panel_widths()`
+
+These helpers are independent of tkinter so future preview/editor features can share tested geometry behavior with the GUI.

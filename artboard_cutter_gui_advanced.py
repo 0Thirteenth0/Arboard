@@ -33,6 +33,8 @@ from src.artboard_cutter_core import (
     parse_widths_list as core_parse_widths_list,
     process_file as core_process_file,
     pt_to_mm as core_pt_to_mm,
+    resize_adjacent_panel_widths as core_resize_adjacent_panel_widths,
+    split_last_panel_width as core_split_last_panel_width,
     validate_output_name as core_validate_output_name,
 )
 from src.artboard_cutter_core.layout import compute_preview_page_height
@@ -526,6 +528,8 @@ class App(BaseTk):
         preview_header = ttk.Frame(preview_group)
         preview_header.pack(fill="x", padx=8, pady=(8, 4))
         ttk.Label(preview_header, textvariable=self.preview_var).pack(side="left", fill="x", expand=True)
+        self.add_panel_button = ttk.Button(preview_header, text="Add Panel", width=10, command=self.on_add_panel)
+        self.add_panel_button.pack(side="right", padx=(4, 0))
         ttk.Button(preview_header, text="Fit", width=6, command=self._preview_fit).pack(side="right", padx=(4, 0))
         ttk.Button(preview_header, text="+", width=3, command=lambda: self._preview_zoom_by(1.2)).pack(side="right", padx=(4, 0))
         ttk.Button(preview_header, text="-", width=3, command=lambda: self._preview_zoom_by(1 / 1.2)).pack(side="right")
@@ -533,14 +537,23 @@ class App(BaseTk):
         self.preview_canvas = tk.Canvas(preview_group, highlightthickness=0, width=720, height=560)
         self.preview_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.preview_canvas.bind("<Configure>", lambda e: self._update_preview())
-        self.preview_canvas.bind("<ButtonPress-1>", self._preview_pan_start)
-        self.preview_canvas.bind("<B1-Motion>", self._preview_pan_move)
+        self.preview_canvas.bind("<ButtonPress-1>", self._preview_left_press)
+        self.preview_canvas.bind("<B1-Motion>", self._preview_left_drag)
+        self.preview_canvas.bind("<ButtonRelease-1>", self._preview_left_release)
+        self.preview_canvas.bind("<Motion>", self._preview_motion)
+        self.preview_canvas.bind("<Leave>", self._preview_leave)
+        self.preview_canvas.bind("<ButtonPress-2>", self._preview_pan_start)
+        self.preview_canvas.bind("<B2-Motion>", self._preview_pan_move)
+        self.preview_canvas.bind("<ButtonRelease-2>", self._preview_pan_release)
         self.preview_canvas.bind("<MouseWheel>", self._preview_mousewheel)
         self._bg_preview_im = None
         self._bg_preview_tk = None
         self._preview_zoom = 1.0
         self._preview_pan = [0.0, 0.0]
         self._preview_drag = None
+        self._preview_edge_drag = None
+        self._preview_view = None
+        self._preview_edge_targets = []
 
         files_frame = ttk.LabelFrame(side, text="Artwork Queue")
         files_frame.pack(fill="both", expand=True, pady=(0, 8))
@@ -1218,6 +1231,8 @@ class App(BaseTk):
         if hasattr(self, "reset_size_button"):
             can_reset = enabled and self._active_profile_has_original_size()
             self.reset_size_button.configure(state=("normal" if can_reset else "disabled"))
+        if hasattr(self, "add_panel_button"):
+            self.add_panel_button.configure(state=("normal" if enabled else "disabled"))
 
     def _active_profile_has_original_size(self) -> bool:
         profile = self._profiles.get(self._active_iid)
@@ -1349,6 +1364,111 @@ class App(BaseTk):
         self._preview_pan = [pan_x + event.x - x0, pan_y + event.y - y0]
         self._update_preview()
 
+    def _preview_pan_release(self, _event=None):
+        self._preview_drag = None
+
+    def _preview_screen_to_mm(self, x: float, y: float) -> tuple[float, float] | None:
+        view = self._preview_view or {}
+        scale = view.get("scale")
+        if not scale:
+            return None
+        return ((x - view["x0"]) / scale, (y - view["y0"]) / scale)
+
+    def _find_preview_edge_target(self, event, tolerance_px: int = 8):
+        view = self._preview_view or {}
+        if not view or not self._preview_edge_targets:
+            return None
+        scale = view.get("scale") or 0
+        if scale <= 0:
+            return None
+        y_mm_pair = self._preview_screen_to_mm(event.x, event.y)
+        if not y_mm_pair:
+            return None
+        _x_mm, y_mm = y_mm_pair
+        if y_mm < 0 or y_mm > view.get("page_h_mm", 0):
+            return None
+        best = None
+        best_distance = tolerance_px + 1
+        for target in self._preview_edge_targets:
+            edge_x_px = view["x0"] + target["x_mm"] * scale
+            distance = abs(event.x - edge_x_px)
+            if distance <= tolerance_px and distance < best_distance:
+                best = target
+                best_distance = distance
+        return best
+
+    def _preview_left_press(self, event):
+        target = self._find_preview_edge_target(event)
+        if not target:
+            return None
+        try:
+            widths = parse_widths_list(self.widths_var.get())
+            overlap = self.overlap_var.get().strip()
+            overlap = (2 * float(self.bleed_var.get())) if overlap == "" else float(overlap)
+        except Exception:
+            return None
+        self._preview_edge_drag = {
+            "edge_index": target["edge_index"],
+            "start_x": event.x,
+            "start_widths": widths,
+            "min_width": max(1.0, max(0.0, overlap) + 0.01),
+        }
+        self.preview_canvas.configure(cursor="sb_h_double_arrow")
+        return "break"
+
+    def _preview_left_drag(self, event):
+        if not self._preview_edge_drag:
+            return None
+        view = self._preview_view or {}
+        scale = view.get("scale") or 0
+        if scale <= 0:
+            return "break"
+        delta_mm = (event.x - self._preview_edge_drag["start_x"]) / scale
+        try:
+            widths = core_resize_adjacent_panel_widths(
+                self._preview_edge_drag["start_widths"],
+                self._preview_edge_drag["edge_index"],
+                delta_mm,
+                min_width_mm=self._preview_edge_drag["min_width"],
+                clamp=False,
+            )
+        except Exception:
+            return "break"
+        self.widths_var.set(" ".join(fmt_mm(width) for width in widths))
+        return "break"
+
+    def _preview_left_release(self, _event=None):
+        if not self._preview_edge_drag:
+            return None
+        self._preview_edge_drag = None
+        self._save_selected_profile_settings()
+        self._update_preview()
+        self._preview_motion(_event) if _event is not None else self.preview_canvas.configure(cursor="")
+        return "break"
+
+    def _preview_motion(self, event):
+        if self._preview_edge_drag:
+            self.preview_canvas.configure(cursor="sb_h_double_arrow")
+            return
+        self.preview_canvas.configure(cursor="sb_h_double_arrow" if self._find_preview_edge_target(event) else "")
+
+    def _preview_leave(self, _event=None):
+        if not self._preview_edge_drag:
+            self.preview_canvas.configure(cursor="")
+
+    def on_add_panel(self):
+        if not self._profiles.get(self._active_iid):
+            return
+        try:
+            widths = parse_widths_list(self.widths_var.get())
+            widths = core_split_last_panel_width(widths)
+        except Exception as exc:
+            messagebox.showerror("Cannot add panel", str(exc))
+            return
+        self.widths_var.set(" ".join(fmt_mm(width) for width in widths))
+        self._save_selected_profile_settings()
+        self._update_preview()
+
     # ---------- Preview ----------
     def _update_preview(self, *_):
         try:
@@ -1368,6 +1488,8 @@ class App(BaseTk):
             # Clear visual preview on parse error
             if hasattr(self, "preview_canvas"):
                 self.preview_canvas.delete("all")
+            self._preview_view = None
+            self._preview_edge_targets = []
             return
         try:
             height = float(self.height_var.get())
@@ -1378,6 +1500,8 @@ class App(BaseTk):
             self.preview_var.set("Target: -")
             if hasattr(self, "preview_canvas"):
                 self.preview_canvas.delete("all")
+            self._preview_view = None
+            self._preview_edge_targets = []
             return
 
         bleed_eff = max(0.0, bleed)
@@ -1411,6 +1535,8 @@ class App(BaseTk):
             return
         cv = self.preview_canvas
         cv.delete("all")
+        self._preview_view = None
+        self._preview_edge_targets = []
 
         cw = max(1, int(cv.winfo_width()))
         ch = max(1, int(cv.winfo_height()))
@@ -1434,6 +1560,17 @@ class App(BaseTk):
         s = min(sx, sy) * self._preview_zoom
         x0 = pad + (cw - 2 * pad - total_w_mm * s) / 2.0 + self._preview_pan[0]
         y0 = pad + (ch - 2 * pad - page_h_mm * s) / 2.0 + self._preview_pan[1]
+        self._preview_view = {
+            "x0": x0,
+            "y0": y0,
+            "scale": s,
+            "page_h_mm": page_h_mm,
+            "total_w_mm": total_w_mm,
+        }
+        self._preview_edge_targets = [
+            {"edge_index": idx, "x_mm": panel_layout[idx]["content_right"]}
+            for idx in range(max(0, len(panel_layout) - 1))
+        ]
 
         def xx(mm):
             return x0 + mm * s

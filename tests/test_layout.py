@@ -1,6 +1,11 @@
 import unittest
 
-from src.artboard_cutter_core.layout import compute_panel_layout, parse_widths_list
+from src.artboard_cutter_core.layout import (
+    compute_panel_layout,
+    parse_widths_list,
+    resize_adjacent_panel_widths,
+    split_last_panel_width,
+)
 
 
 class PanelLayoutTests(unittest.TestCase):
@@ -47,6 +52,38 @@ class PanelLayoutTests(unittest.TestCase):
 
     def test_parse_widths_accepts_commas_and_spaces(self):
         self.assertEqual(parse_widths_list("100, 200 300"), [100.0, 200.0, 300.0])
+
+    def test_split_last_panel_preserves_total_width(self):
+        widths = split_last_panel_width([1200, 1200, 1100])
+        self.assertEqual(widths, [1200.0, 1200.0, 550.0, 550.0])
+        self.assertEqual(sum(widths), 3500.0)
+
+    def test_resize_adjacent_panel_widths_preserves_total_width(self):
+        widths = resize_adjacent_panel_widths([1000, 800, 600], 0, 125)
+        self.assertEqual(widths, [1125.0, 675.0, 600.0])
+        self.assertEqual(sum(widths), 2400.0)
+
+    def test_resize_adjacent_panel_widths_clamps_min_width(self):
+        widths = resize_adjacent_panel_widths([1000, 800], 0, 900, min_width_mm=50)
+        self.assertEqual(widths, [1750.0, 50.0])
+        self.assertEqual(sum(widths), 1800.0)
+
+    def test_resize_adjacent_panel_widths_can_reset_when_drag_exceeds_limit(self):
+        widths = resize_adjacent_panel_widths([1000, 800], 0, 900, min_width_mm=50, clamp=False)
+        self.assertEqual(widths, [1000.0, 800.0])
+
+    def test_resize_adjacent_panel_widths_can_protect_overlap_value(self):
+        start = [1000, 80]
+        widths = resize_adjacent_panel_widths(start, 0, 50, min_width_mm=40.01, clamp=False)
+        self.assertEqual(widths, [1000.0, 80.0])
+        _panels, _total, overlap = compute_panel_layout(widths, 20, 40)
+        self.assertEqual(overlap, 40)
+
+    def test_resize_adjacent_panel_widths_rejects_bleed_edges(self):
+        with self.assertRaises(IndexError):
+            resize_adjacent_panel_widths([1000, 800], -1, 10)
+        with self.assertRaises(IndexError):
+            resize_adjacent_panel_widths([1000, 800], 1, 10)
 
 
 if __name__ == "__main__":

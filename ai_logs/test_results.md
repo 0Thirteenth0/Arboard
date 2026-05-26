@@ -240,3 +240,47 @@ Already covered by automated tests:
 - Unusual page box fixture behavior.
 - Theme contrast-token checks.
 - Settings persistence and legacy settings fallback.
+
+## 2026-05-26 - Interactive preview editor tests
+
+Commands:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest tests.test_layout`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Compile passed.
+- Layout tests passed: 10 tests.
+- Full suite passed: 44 tests, 3 skipped.
+
+New automated coverage:
+
+- Splitting the last panel preserves total content width.
+- Drag-style adjacent panel resizing preserves total content width.
+- Adjacent resize clamps to a minimum panel width.
+- Non-internal edge indices are rejected so bleed edges are not treated as draggable panel edges.
+
+Skipped tests:
+
+- The same 3 GUI/Tk smoke and screenshot tests remain skipped because this local Python/Tk runtime still cannot initialize Tcl/Tk.
+
+## 2026-05-26 - Seam overlap protection tests
+
+Commands:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest tests.test_layout`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Compile passed.
+- Layout tests passed: 12 tests.
+- Full suite passed: 46 tests, 3 skipped.
+
+New automated coverage:
+
+- Interactive-style adjacent resize can return the original widths instead of clamping when a drag exceeds the allowed boundary.
+- The protected minimum width can preserve the requested overlap value so preview seam dragging does not shrink overlap near neighboring seams or bleed edges.

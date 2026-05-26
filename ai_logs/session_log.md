@@ -250,3 +250,21 @@ Track AI-assisted work sessions here.
 - Cleaned generated cache/test-output/build-log artifacts while keeping the finished `dist/ArtboardCutter.exe` available locally.
 - Updated `.gitignore` so local `.ai` artwork and root `.log` files remain ignored, while documentation screenshots and icon assets are trackable.
 - No commit or push was performed yet in this entry.
+
+## 2026-05-26 - Interactive preview editor foundation
+
+- Added pure layout helpers for interactive panel editing: split the last panel into two equal panels and resize adjacent panel widths while preserving total content width.
+- Added layout tests covering Add Panel behavior, total-width preservation, min-width clamping, and rejection of non-internal bleed-edge indices.
+- Reworked live preview input handling so middle mouse drag pans the canvas and left mouse drag is reserved for valid internal panel boundaries only.
+- Added hover cursor feedback and cached preview transform/edge targets for overlap-edge hit detection.
+- Added an `Add Panel` button inside the Live Preview header; it appends a panel by splitting the last panel width without changing overall artwork size.
+- Dragging an internal boundary updates the Panel Widths field live, saves the active `ArtworkProfile`, and redraws the preview through the same layout path used by export.
+- Validation run: compile passed; full unit suite passed with 44 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - Preview seam overlap protection
+
+- Updated interactive seam dragging so a drag cannot create panel widths smaller than the requested overlap value.
+- When the dragged seam crosses that protected limit, the preview width list resets to the widths from before the drag movement instead of letting `compute_panel_layout()` shrink the effective overlap.
+- Kept export/layout behavior unchanged for manually typed extreme values; the protection is specific to interactive preview editing.
+- Added tests for non-clamping drag reset behavior and overlap-preserving minimum width behavior.
+- Validation run: compile passed; full unit suite passed with 46 tests and the existing 3 guarded GUI/Tk skips.

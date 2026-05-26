@@ -160,3 +160,19 @@ Current validation baseline:
 - Removed duplicate `artboard_cutter_gui_advanced.spec`.
 - Kept generated executable output local under ignored `dist/`.
 - Added ignore coverage for local `.ai` artwork and root `.log` files.
+
+## 2026-05-26 - Interactive live preview editing
+
+- Added the first editable preview layer without changing export engine contracts.
+- Middle mouse drag now pans the preview canvas.
+- Mouse wheel remains the zoom control.
+- Left mouse drag is limited to cached internal panel boundary hit targets; outside bleed edges are not draggable.
+- Dragging a valid internal edge updates the two adjacent panel widths while preserving total content width.
+- Added `Add Panel` in the Live Preview block; it splits the last panel width in half and appends the new panel without changing overall artwork size.
+- Added core tests for the panel-editing math so future preview tools can reuse the same behavior.
+
+Current validation baseline:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests` passed.
+- `python -m unittest discover -s tests` passed: 44 tests, 3 skipped.
+- The 3 skipped tests remain the known local Tcl/Tk GUI-runtime skips.

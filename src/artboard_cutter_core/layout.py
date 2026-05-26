@@ -31,6 +31,54 @@ def parse_widths_list(s: str) -> list[float]:
     return [float(c) for c in chunks]
 
 
+def split_last_panel_width(widths_mm: list[float] | tuple[float, ...]) -> list[float]:
+    """Append one panel by splitting the last panel without changing total width."""
+    widths = [float(w) for w in widths_mm]
+    if not widths:
+        raise ValueError("At least one panel width is required.")
+    if widths[-1] <= 0:
+        raise ValueError("Last panel width must be greater than 0.")
+    half = widths[-1] * 0.5
+    return widths[:-1] + [half, half]
+
+
+def resize_adjacent_panel_widths(
+    widths_mm: list[float] | tuple[float, ...],
+    edge_index: int,
+    delta_mm: float,
+    *,
+    min_width_mm: float = 1.0,
+    clamp: bool = True,
+) -> list[float]:
+    """
+    Move the boundary between two adjacent panels while preserving total width.
+
+    edge_index is the zero-based internal edge between widths[edge_index] and
+    widths[edge_index + 1]. Positive delta increases the left panel and
+    decreases the right panel.
+    """
+    widths = [float(w) for w in widths_mm]
+    if len(widths) < 2:
+        raise ValueError("At least two panel widths are required.")
+    if edge_index < 0 or edge_index >= len(widths) - 1:
+        raise IndexError("edge_index must reference an internal panel edge.")
+    min_width = max(0.01, float(min_width_mm))
+    left = widths[edge_index]
+    right = widths[edge_index + 1]
+    if left <= 0 or right <= 0:
+        raise ValueError("Panel widths must be greater than 0.")
+
+    min_delta = min_width - left
+    max_delta = right - min_width
+    requested_delta = float(delta_mm)
+    if not clamp and (requested_delta < min_delta or requested_delta > max_delta):
+        return widths
+    delta = min(max(requested_delta, min_delta), max_delta)
+    widths[edge_index] = left + delta
+    widths[edge_index + 1] = right - delta
+    return widths
+
+
 def compute_panel_layout(
     widths_mm: list[float] | tuple[float, ...],
     bleed_mm: float,
