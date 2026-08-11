@@ -3,11 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .concurrency import PDF_OPERATION_LOCK
 from .illustrator_integration import get_illustrator_artboard_names
+from .modes import PDF_PRESERVE_EXPORT_MODE, is_pdf_preserve_mode, normalize_export_mode
 from .pdf_io import open_pdf_robust
 from .units import fmt_mm
 
 INVALID_OUTPUT_NAME_CHARS = set('<>:"/\\|?*')
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass
@@ -26,7 +36,12 @@ class ArtworkProfile:
     overlap_mm: str = "0"
     overlap_mode: str = "Shared"
     dpi: str = "150"
+    color_mode: str = "RGB"
+    icc_mode: str = "Off"
+    icc_profile_path: str = ""
+    rendering_intent: str = "Perceptual"
     export_format: str = "PDF"
+    raster_export_format: str = "PDF"
     export_mode: str = "Raster"
     preserve_vectors: bool = False
     vector_fit_mode: str = "stretch"
@@ -64,10 +79,20 @@ class ArtworkProfile:
         return True
 
     def apply_export_mode_rules(self) -> None:
-        self.preserve_vectors = self.export_mode == "Vector"
+        self.export_mode = normalize_export_mode(self.export_mode)
+        self.preserve_vectors = is_pdf_preserve_mode(self.export_mode)
         if self.preserve_vectors:
+            if self.export_format.upper() in {"JPG", "JPEG", "TIF", "TIFF"}:
+                self.raster_export_format = {
+                    "JPG": "JPG",
+                    "JPEG": "JPG",
+                    "TIF": "TIFF",
+                    "TIFF": "TIFF",
+                }[self.export_format.upper()]
             self.export_format = "PDF"
             self.vector_fit_mode = "stretch"
+        elif self.export_format.upper() not in {"PDF", "JPG", "JPEG", "TIF", "TIFF"}:
+            self.export_format = self.raster_export_format
 
 
 def validate_output_name(name: str) -> str:
@@ -79,6 +104,10 @@ def validate_output_name(name: str) -> str:
     invalid = sorted({ch for ch in cleaned if ch in INVALID_OUTPUT_NAME_CHARS or ord(ch) < 32})
     if invalid:
         raise ValueError(f"Output name contains invalid character(s): {' '.join(invalid)}")
+    if cleaned.endswith((" ", ".")):
+        raise ValueError("Output name cannot end with a space or period.")
+    if cleaned.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"Output name is reserved by Windows: {cleaned}")
     return cleaned
 
 
@@ -93,6 +122,8 @@ def sanitize_output_name(name: str, fallback: str) -> str:
     cleaned = "".join(chars).rstrip(" .")
     if not cleaned or cleaned in {".", ".."}:
         cleaned = fallback
+    if cleaned.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
     return validate_output_name(cleaned)
 
 
@@ -113,6 +144,44 @@ def create_artwork_profiles(
     overlap_mm: str = "0",
     overlap_mode: str = "Shared",
     dpi: str = "150",
+    color_mode: str = "RGB",
+    icc_mode: str = "Off",
+    icc_profile_path: str = "",
+    rendering_intent: str = "Perceptual",
+    export_format: str = "PDF",
+    export_mode: str = "Raster",
+    artboard_names: list[str] | None = None,
+    use_illustrator_names: bool = False,
+) -> list[ArtworkProfile]:
+    with PDF_OPERATION_LOCK:
+        return _create_artwork_profiles_locked(
+            file_path,
+            bleed_mm=bleed_mm,
+            overlap_mm=overlap_mm,
+            overlap_mode=overlap_mode,
+            dpi=dpi,
+            color_mode=color_mode,
+            icc_mode=icc_mode,
+            icc_profile_path=icc_profile_path,
+            rendering_intent=rendering_intent,
+            export_format=export_format,
+            export_mode=export_mode,
+            artboard_names=artboard_names,
+            use_illustrator_names=use_illustrator_names,
+        )
+
+
+def _create_artwork_profiles_locked(
+    file_path: Path,
+    *,
+    bleed_mm: str = "0",
+    overlap_mm: str = "0",
+    overlap_mode: str = "Shared",
+    dpi: str = "150",
+    color_mode: str = "RGB",
+    icc_mode: str = "Off",
+    icc_profile_path: str = "",
+    rendering_intent: str = "Perceptual",
     export_format: str = "PDF",
     export_mode: str = "Raster",
     artboard_names: list[str] | None = None,
@@ -147,7 +216,12 @@ def create_artwork_profiles(
                 overlap_mm=overlap_mm,
                 overlap_mode=overlap_mode,
                 dpi=dpi,
+                color_mode=("CMYK" if str(color_mode).upper() == "CMYK" else "RGB"),
+                icc_mode=icc_mode,
+                icc_profile_path=icc_profile_path,
+                rendering_intent=rendering_intent,
                 export_format=export_format,
+                raster_export_format=export_format,
                 export_mode=export_mode,
                 vector_fit_mode="stretch",
             )

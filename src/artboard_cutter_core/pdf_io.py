@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # type: ignore
 
 
 def force_page_boxes(page: fitz.Page) -> None:
@@ -48,4 +51,3 @@ def page_box_snapshot(page: fitz.Page) -> dict[str, list[float] | int]:
         except Exception:
             pass
     return data
-

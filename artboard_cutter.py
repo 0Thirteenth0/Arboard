@@ -21,7 +21,10 @@ import argparse
 import sys
 from pathlib import Path
 
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # type: ignore
 
 PT_PER_MM = 72.0 / 25.4
 

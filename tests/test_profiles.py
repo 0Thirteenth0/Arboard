@@ -27,14 +27,25 @@ class ArtworkProfileTests(unittest.TestCase):
         self.assertEqual(profile.panel_widths, "500")
         self.assertEqual(profile.height_mm, "1000")
 
-    def test_vector_mode_forces_pdf_and_stretch(self):
+    def test_pdf_preserve_mode_forces_pdf_and_stretch(self):
         profile = ArtworkProfile(file_path="sample.pdf", export_mode="Vector", export_format="JPG")
 
         profile.apply_export_mode_rules()
 
         self.assertTrue(profile.preserve_vectors)
         self.assertEqual(profile.export_format, "PDF")
+        self.assertEqual(profile.export_mode, "PDF Preserve")
         self.assertEqual(profile.vector_fit_mode, "stretch")
+
+    def test_pdf_preserve_remembers_last_raster_image_format(self):
+        profile = ArtworkProfile(
+            file_path="sample.pdf",
+            export_mode="PDF Preserve",
+            export_format="TIFF",
+        )
+        profile.apply_export_mode_rules()
+        self.assertEqual(profile.export_format, "PDF")
+        self.assertEqual(profile.raster_export_format, "TIFF")
 
     def test_multipage_import_creates_one_profile_per_page(self):
         with tempfile.TemporaryDirectory() as td:
@@ -73,6 +84,10 @@ class ArtworkProfileTests(unittest.TestCase):
     def test_output_name_validation(self):
         self.assertEqual(validate_output_name(" Edited "), "Edited")
         for name in ["", "bad/name", "bad:name", "."]:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    validate_output_name(name)
+        for name in ["CON", "nul.txt", "Panel.", "COM1"]:
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     validate_output_name(name)

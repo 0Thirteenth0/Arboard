@@ -161,6 +161,76 @@ Track product and implementation decisions here.
 - Keep interactive panel edits as width edits, not per-edge overlap edits, because the export engine currently has one global overlap value and one list of panel widths.
 - Preserve total content width during an internal edge drag by increasing one adjacent panel width and decreasing the next adjacent panel width.
 - Treat only internal panel boundaries as draggable targets; outside bleed edges remain locked and non-interactive.
-- Add `Add Panel` by splitting the last existing width in half rather than resizing every panel. This keeps overall artwork size stable and makes the operation easy to reverse manually.
+- Add `Add Panel` by increasing the panel count and evenly redistributing the full artwork width. This matches the production rule that the overall artwork dimension is divided by the requested panel count.
 - Keep the preview editor on the existing tkinter canvas for now, but cache transform and hit-target state so future interactive tools do not need to reverse-engineer canvas drawings.
 - Protect the configured overlap during mouse editing by rejecting drag results that would make either adjacent panel narrower than `overlap + 0.01 mm`. This prevents the layout engine from reducing effective overlap during interactive edits.
+
+## 2026-05-26 - PDF Preserve naming and image behavior
+
+- Rename the visible `Vector` export option to `PDF Preserve` because raster image inputs can use the fast PDF pipeline but cannot become true vector artwork.
+- Continue using the internal `preserve_vectors` flag for compatibility with existing engine options, but normalize user/profile/settings values through `normalize_export_mode()`.
+- Treat legacy `Vector` settings as `PDF Preserve` so existing AppData files keep working.
+- Convert raster image documents to an in-memory PDF before clipping. This avoids expensive DPI panel rendering when the requested output is PDF while preserving the source image as embedded raster content.
+- Keep Raster mode as the required path for JPG/TIFF output because those output formats must be rasterized.
+
+## 2026-05-26 - Window overflow strategy
+
+- Do not scroll the entire application root window. Global scrollbars made the
+  desktop UI feel broken and caused the preview/settings areas to behave as one
+  oversized page.
+- Keep the root as a fixed two-column production-tool layout.
+- Keep preview overflow inside the preview canvas through zoom and pan.
+- Keep queue overflow inside the queue table.
+- Allow only the right control column to scroll vertically when the window is
+  too short for all controls.
+
+## 2026-05-26 - Theme redesign direction
+
+- Keep tkinter/ttk for this pass rather than replacing the UI framework, because
+  the requested work is visual structure and theming rather than new export
+  architecture.
+- Add richer design tokens while retaining legacy aliases. This avoids breaking
+  preview/export UI code that still references older token names.
+- Make Soft Blue the default theme because it best matches the current product
+  direction and the provided design reference.
+- Keep older themes available for now so existing saved theme names still load.
+- Use empty-state drawing in the preview canvas rather than introducing a
+  separate overlay widget that could interfere with preview mouse interactions.
+## 2026-05-26 - UI icon and card styling approach
+
+- Kept tkinter/ttk instead of changing frameworks for this pass because the
+  request was visual polish without export/geometry risk.
+- Used local PNG icons instead of SVG at runtime because Tk loads PNG reliably
+  without adding another dependency.
+- Kept text labels next to icons so controls remain understandable if an icon
+  fails to load or a theme lowers icon contrast.
+- Bundled icons through the existing PyInstaller spec rather than relying on
+  runtime-generated or downloaded assets.
+- Used explicit card/root/field label styles to avoid accidental selected-looking
+  label backgrounds across nested ttk containers.
+
+## 2026-08-08 - Export safety and workflow decisions
+
+- Keep the desktop application: local large-file access, Illustrator integration, and prepress output suit a local process better than a web rewrite.
+- Treat JPG/TIFF as explicit Raster formats. PDF Preserve forces PDF and remembers the last Raster image format.
+- Make output transactional at the whole-panel-set level and require explicit overwrite approval.
+- Reject invalid typed overlap instead of silently changing it during export.
+- Warn before non-uniform scaling when source and target aspect ratios differ by more than 1%.
+- Render file probing and previews off the Tk thread and provide cooperative export cancellation.
+- Offer RGB and CMYK pixel modes, but do not claim ICC-managed conversion until an output-profile workflow is production-tested.
+- Pin runtime/build dependencies and include executable version metadata.
+
+## 2026-08-08 - Export preset scope
+
+- Presets contain reusable export behavior only: bleed, overlap, overlap mode, DPI, color mode, export format, and export mode.
+- Panel widths and artwork height remain profile-specific and are never applied from a preset.
+- The output folder remains an application-level choice and is never stored in or applied by a preset.
+
+## 2026-08-09 - Production hardening decisions
+
+- Keep layout templates separate from export presets. Templates store proportions and preserve the active artwork's overall width.
+- Use streamed TIFF strips instead of reducing TIFF DPI to control memory. JPG and raster PDF retain the shared safe-DPI rule.
+- Verify staged outputs before commit and reject silent blank/uniform renders.
+- Support explicit ICC conversion/assignment and preserve the selected output profile through TIFF/JPG embedding or a raster-PDF output intent.
+- Persist an atomic recovery queue during active sessions; normal close removes it, while abnormal shutdown offers restore and retry.
+- Complete artwork dimensions and paths belong in saved queue job files instead.

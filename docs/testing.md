@@ -2,8 +2,9 @@
 
 ## Local Tcl/Tk Runtime
 
-Interactive GUI smoke tests are guarded because the current local Python 3.13
-Tk runtime cannot create a Tcl interpreter in this environment.
+GUI smoke tests are guarded so restricted environments without access to the
+local Tcl library report a skip. On the Windows host, the current Python 3.14
+Tk 8.6.15 runtime was verified successfully and all GUI smoke tests passed.
 
 Observed command:
 
@@ -20,15 +21,14 @@ Tk unavailable for interactive GUI smoke tests: Can't find a usable init.tcl in 
 This probably means that Tcl wasn't installed properly.
 ```
 
-The file `init.tcl` exists at that path, so this appears to be a local Python/Tcl
-installation/runtime resolution issue rather than an application import or syntax
-failure. The tests skip with the exact exception until Tk can create `Tk()`.
+The sandbox-only skip is an environment access limitation, not an application
+failure. Run the suite from a normal Windows terminal for the complete result.
 
 Local setup checks:
 
 ```powershell
-python -c "import tkinter as tk; root=tk.Tk(); print(root.tk.call('info','patchlevel')); root.destroy()"
-python -m unittest tests.test_gui_smoke -v
+.\.venv\Scripts\python.exe -c "import tkinter as tk; root=tk.Tk(); print(root.tk.call('info','patchlevel')); root.destroy()"
+.\.venv\Scripts\python.exe -m unittest tests.test_gui_smoke -v
 ```
 
 If the first command fails before application code runs, repair or reinstall the
@@ -39,12 +39,22 @@ instead of failing unrelated CI jobs.
 
 ## Test Coverage Added
 
+- Streaming RGB/CMYK TIFF, ICC embedding, and raster-PDF output-intent checks.
+- Automatic output verification and blank/uniform-output rejection.
+- BigTIFF and large-job preflight decisions.
+- Proportional layout-template normalization and direct count redistribution.
+- Recovery-job serialization and retry/resume state coverage.
+
 - Theme WCAG contrast checks for all built-in theme foreground/background pairs.
+- Theme token presence checks for centralized design tokens such as background,
+  card, canvas, text, accent, input, button, table, scrollbar, selection,
+  warning, error, and success.
 - Preview overlay contrast checks for all built-in themes.
 - Interactive GUI launch smoke test, skipped when Tk is unavailable.
 - Preview screenshot/snapshot smoke test across themes, skipped when Tk or screenshot capture is unavailable.
 - Windows high-DPI scaling smoke test, skipped outside Windows or when Tk is unavailable.
-- Raster/vector rendered pixel alignment test.
+- Raster/PDF Preserve rendered pixel alignment test.
+- Raster image input through PDF Preserve mode.
 - Rotated PDF fixture export test.
 - Unusual page box fixture export test.
 - GUI wrapper compatibility test that verifies legacy public wrappers still
@@ -55,6 +65,12 @@ instead of failing unrelated CI jobs.
 
 Run these checks after `tkinter.Tk()` works locally:
 
+- Set the panel count directly and confirm every panel is redistributed across the unchanged total artwork width.
+- Save/apply a proportional layout template on artwork with a different total width.
+- Export ICC-managed JPG, TIFF, and raster PDF and inspect the embedded profile/output intent in the production color tool.
+- Cancel a multi-job run, restart the app abnormally, restore the recovery queue, and use `Retry Failed / Resume`.
+- Review the preflight panel count, effective DPI, estimated size, BigTIFF status, and free-space warning before continuing.
+
 - Launch `python artboard_cutter_gui_advanced.py`.
 - Add one single-page file and one multi-page/AI-compatible file.
 - Confirm selecting different queue rows restores each row's independent width,
@@ -64,8 +80,29 @@ Run these checks after `tkinter.Tk()` works locally:
 - Use `Reset Size` on one child row and confirm no other child row changes.
 - Switch every built-in theme and confirm labels, radio selections, buttons,
   queue rows, queue headings, and preview overlays remain readable.
-- Export both Raster and Vector with `Shared` and `Left` overlap modes; compare
+- Confirm field labels blend into their card surface and do not appear as
+  selected/highlighted blocks.
+- Confirm toolbar/action icons appear for preview, queue, export, browse, and
+  log actions in both Soft Blue and Dark Pro.
+- Confirm the empty preview workspace and empty artwork queue message remain
+  readable in every theme.
+- Export both Raster and PDF Preserve with `Shared` and `Left` overlap modes; compare
   panel dimensions and visible overlap zones against the live preview.
+- In PDF Preserve mode, test both PDF/AI-compatible PDF content and raster image
+  inputs. Raster images should stay embedded raster content inside PDF panels,
+  not become traced vector paths.
+- Test interactive preview editing: mouse wheel zoom, middle mouse pan, Add
+  Panel evenly dividing total artwork width across all panels, internal seam dragging, and seam-limit reset near neighboring seams or
+  outside bleed edges.
+- Export one JPG and one TIFF and confirm no PDF is produced for those jobs.
+- Check both RGB and CMYK output in the target prepress software. Color mode is
+  encoded, but no ICC profile conversion or embedding is currently performed.
+- Cancel a multi-panel export and confirm no partial replacement set remains.
+- Save/apply/delete a preset, then save and reload a complete queue job.
+- Shrink the application window vertically and horizontally. Confirm there are
+  no global root-window scrollbars, the preview remains in the left panel, and
+  the right control column exposes queue/settings/run/log content through its
+  own vertical scrollbar only when needed.
 
 ## Preview/Export Equivalence
 
@@ -79,7 +116,7 @@ Manual visual checks should include:
 - Outside bleed visible only on the full artwork's outside edges.
 - `Shared` overlap split between neighbors.
 - `Left` overlap where only the right/later panel extends left.
-- Raster and Vector output rendered back to pixels for visible alignment.
+- Raster and PDF Preserve output rendered back to pixels for visible alignment.
 - Theme changes without preview overlay loss.
 
 ## Runtime Logs
@@ -87,7 +124,7 @@ Manual visual checks should include:
 JSON runtime logs are written under:
 
 ```text
-logs/
+%LOCALAPPDATA%\ArtboardCutter\logs\
 ```
 
 The GUI includes an `Open Logs Folder` button in the Run panel. The action
@@ -125,7 +162,7 @@ numbered names and shows a user-facing warning.
 
 ## Diff Artifacts
 
-Raster/vector alignment failures write a PPM diff image under:
+Raster/PDF Preserve alignment failures write a PPM diff image under:
 
 ```text
 test_outputs/failures/

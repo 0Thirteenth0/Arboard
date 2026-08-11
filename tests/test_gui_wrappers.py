@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # type: ignore
 
 from artboard_cutter_gui_advanced import process_file
 from artboard_cutter_gui_advanced import App
@@ -12,6 +15,27 @@ from tests.helpers import make_grid_pdf
 
 
 class GuiWrapperCompatibilityTests(unittest.TestCase):
+    def test_all_queue_layers_are_registered_as_file_drop_targets(self):
+        class FakeDropWidget:
+            def __init__(self):
+                self.types = []
+                self.bindings = []
+
+            def drop_target_register(self, drop_type):
+                self.types.append(drop_type)
+
+            def dnd_bind(self, event_name, callback):
+                self.bindings.append((event_name, callback))
+
+        widgets = [FakeDropWidget(), FakeDropWidget(), FakeDropWidget()]
+        fake_app = type("FakeApp", (), {"on_drop": lambda self, event: None})()
+
+        App._register_file_drop_targets(fake_app, *widgets)
+
+        for widget in widgets:
+            self.assertEqual(len(widget.types), 1)
+            self.assertEqual(widget.bindings[0][0], "<<Drop>>")
+
     def test_process_file_wrapper_delegates_to_core_export(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -42,17 +66,18 @@ class GuiWrapperCompatibilityTests(unittest.TestCase):
             finally:
                 doc.close()
 
-    def test_vector_validation_allows_blank_dpi(self):
+    def test_pdf_preserve_validation_allows_blank_dpi(self):
         profile = ArtworkProfile(
             file_path="source.pdf",
-            output_name="VectorBlankDpi",
+            output_name="PdfPreserveBlankDpi",
             panel_widths="100 100",
             height_mm="100",
             bleed_mm="10",
             overlap_mm="20",
             dpi="",
             export_format="PDF",
-            export_mode="Vector",
+            export_mode="PDF Preserve",
+            color_mode="CMYK",
         )
 
         values = App._validate_profile_for_export(None, profile)
@@ -60,6 +85,7 @@ class GuiWrapperCompatibilityTests(unittest.TestCase):
         self.assertEqual(values[5], 72)
         self.assertEqual(values[6], "pdf")
         self.assertTrue(values[7])
+        self.assertEqual(values[8], "CMYK")
 
     def test_raster_validation_requires_dpi(self):
         profile = ArtworkProfile(

@@ -176,3 +176,39 @@ Current validation baseline:
 - `python -m compileall -q artboard_cutter_gui_advanced.py src tests` passed.
 - `python -m unittest discover -s tests` passed: 44 tests, 3 skipped.
 - The 3 skipped tests remain the known local Tcl/Tk GUI-runtime skips.
+
+## 2026-05-26 - PDF Preserve for image inputs
+
+- Renamed the visible fast PDF mode to `PDF Preserve`.
+- Preserved backward compatibility for existing `Vector` settings and profile values.
+- Allowed raster image inputs to use the fast PDF preserve pipeline by converting non-PDF PyMuPDF documents to an in-memory PDF before clipping.
+- Updated README wording so raster images are described as embedded raster content inside PDF panels, not true vector artwork.
+- Added tests for PNG source export through PDF Preserve mode.
+- Rebuilt the Windows executable after the PDF Preserve and interactive preview changes.
+- Refreshed README and `docs/testing.md` to document PDF Preserve terminology and interactive preview validation.
+
+Current validation baseline:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests` passed.
+- `python -m unittest discover -s tests` passed: 47 tests, 3 skipped.
+- The 3 skipped tests remain the known local Tcl/Tk GUI-runtime skips.
+## 2026-05-26 - UI reference polish
+
+- Implemented a UI-only polish pass toward the provided Soft Blue reference.
+- Added bundled local UI icons in `assets/icons/` and included them in the
+  PyInstaller spec.
+- Converted major UI sections toward soft card frames with lighter borders,
+  cleaner headers, and icon-based actions.
+- Expanded theme tokens for app/card/canvas/button/input/table/scrollbar
+  styling and kept existing theme persistence behavior.
+- Preserved export, geometry, PDF/raster, and file-processing logic.
+
+## 2026-08-08 - Improvement pass complete
+
+- Fixed JPG/TIFF routing and requested-DPI rendering.
+- Changed Add Panel to divide complete artwork width evenly across the increased panel count.
+- Added shared validation, collision checks, atomic replacement, stale-panel cleanup, and cancellation.
+- Moved import inspection and preview rendering off the Tk thread.
+- Added aspect warnings, AppData logs/defaults, recent paths, RGB/CMYK, presets, and queue job save/load.
+- Reduced GUI/export duplication through focused core modules and lazy public imports.
+- Pinned dependencies, added build metadata, rebuilt the Windows executable, and smoke-launched it successfully.

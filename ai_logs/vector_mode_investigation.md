@@ -91,16 +91,18 @@ This avoids reasoning about each panel clip in original source coordinates durin
 
 This still preserves vector content via PDF page/Form placement rather than rasterizing.
 
-## 2026-05-19 - Current Vector Mode Summary
+## 2026-05-19 - Current PDF Preserve Mode Summary
 
-Final user-facing vector behavior:
+Current user-facing fast PDF behavior:
 
-- The app exposes `Vector` as an export mode.
-- Vector output is always PDF.
-- Vector output always stretches to the user-requested total width and height.
-- The implementation creates a full-size stretched vector master page first, then clips panel outputs from that master.
-- Batch export now reads vector/raster mode per queued `ArtworkProfile`, so one selected row no longer controls all checked rows.
-- Multi-page imports now pass each profile's `source_page_index` into vector export, so vector mode no longer hardcodes page 0.
+- The app exposes `PDF Preserve` as the fast PDF export mode.
+- PDF Preserve output is always PDF.
+- PDF Preserve output always stretches to the user-requested total width and height.
+- PDF/AI-compatible PDF content can remain vector/Form XObject content where PyMuPDF preserves it.
+- Raster image inputs remain embedded raster content inside PDF panels and are not vectorized.
+- The implementation creates a full-size stretched PDF master page first, then clips panel outputs from that master.
+- Batch export now reads export mode per queued `ArtworkProfile`, so one selected row no longer controls all checked rows.
+- Multi-page imports now pass each profile's `source_page_index` into PDF Preserve export, so the fast PDF path no longer hardcodes page 0.
 
 Why:
 
@@ -129,3 +131,18 @@ Latest status:
 - Automated raster/vector pixel alignment exists for generated fixture artwork.
 - Rotated and unusual page box fixtures are covered by export geometry tests.
 - Remaining vector validation is primarily production-artwork/manual review, especially files with missing Illustrator links or Illustrator-only document behavior.
+
+2026-05-26 update:
+
+- The user-facing `Vector` mode is now named `PDF Preserve` because the same fast PDF pipeline can preserve PDF vector content or embed raster image sources without DPI re-rendering.
+- Raster images exported through PDF Preserve are not converted into editable vector paths; they are placed as raster image content inside PDF panels.
+- Non-PDF source documents are converted to an in-memory PDF before the stretch-master clipping pipeline runs.
+- Added automated PNG-input coverage for PDF Preserve panel dimensions.
+
+2026-08-08 update:
+
+- PDF Preserve remains PDF-only and disables Raster-only DPI, color-mode, and JPG/TIFF controls.
+- The GUI remembers the last JPG/TIFF Raster choice and restores it after leaving PDF Preserve.
+- Output staging and overwrite rollback now cover both PDF Preserve and Raster export.
+- Aspect-ratio differences over 1% are surfaced because stretch mode intentionally scales X and Y independently.
+- ICC/spot-color/overprint fidelity remains a manual production qualification item.

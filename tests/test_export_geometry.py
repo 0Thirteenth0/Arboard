@@ -2,14 +2,41 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # type: ignore
+from PIL import Image
 
 from src.artboard_cutter_core.export import ExportOptions, process_file
+from src.artboard_cutter_core.errors import ExportCancelled, ExportError
+from src.artboard_cutter_core.output_io import OutputConflictError, StagedOutputSet
+from src.artboard_cutter_core.raster_export import MAX_RENDER_BYTES, choose_safe_raster_dpi
 from src.artboard_cutter_core.units import pt_to_mm
 from tests.helpers import make_grid_pdf, make_multipage_pdf, make_rotated_pdf, make_unusual_page_box_pdf, render_pdf_page_rgb
 
 
 class ExportGeometryTests(unittest.TestCase):
+    def test_cmyk_safety_limit_uses_one_dpi_for_large_panel_set(self):
+        panel_sizes = [
+            (3376.0431496062993, 10034.744881889765),
+            (1726.5118110236226, 10034.744881889765),
+        ]
+
+        effective_dpi, _ = choose_safe_raster_dpi(panel_sizes, 150, "CMYK")
+
+        self.assertLess(effective_dpi, 150)
+        for width_pt, height_pt in panel_sizes:
+            pixels = (width_pt / 72 * effective_dpi) * (height_pt / 72 * effective_dpi)
+            self.assertLessEqual(pixels * 4, MAX_RENDER_BYTES)
+
+    def test_same_large_panel_is_safe_at_requested_dpi_in_rgb(self):
+        panel_sizes = [(3376.0431496062993, 10034.744881889765)]
+
+        effective_dpi, _ = choose_safe_raster_dpi(panel_sizes, 150, "RGB")
+
+        self.assertEqual(effective_dpi, 150)
+
     def assert_pdf_size_mm(self, pdf_path: Path, expected_w: float, expected_h: float, places=2):
         doc = fitz.open(pdf_path)
         try:
@@ -99,6 +126,26 @@ class ExportGeometryTests(unittest.TestCase):
             self.assert_pdf_size_mm(options.output_root / "grid_1.pdf", 80, 100)
             self.assert_pdf_size_mm(options.output_root / "grid_2.pdf", 70, 100)
 
+    def test_pdf_preserve_exports_raster_image_input_as_pdf_panels(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "image.png"
+            Image.new("RGB", (320, 160), (20, 120, 220)).save(src)
+            options = ExportOptions(
+                bleed_mm=0,
+                widths_mm=[80, 80],
+                height_mm=80,
+                overlap_mm=0,
+                dpi=72,
+                output_root=root / "out",
+                export_fmt="pdf",
+                preserve_vectors=True,
+                vector_fit_mode="stretch",
+            )
+            process_file(src, options)
+            self.assert_pdf_size_mm(options.output_root / "image_1.pdf", 80, 80)
+            self.assert_pdf_size_mm(options.output_root / "image_2.pdf", 80, 80)
+
     def test_rotated_pdf_fixture_exports_expected_panel_dimensions(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -185,6 +232,156 @@ class ExportGeometryTests(unittest.TestCase):
             red = sum(samples[0::3]) / (len(samples) // 3)
             blue = sum(samples[2::3]) / (len(samples) // 3)
             self.assertGreater(blue, red, "Export appears to use page 1 instead of the requested second page.")
+
+
+    def test_raster_jpg_outputs_jpg_with_requested_pixels_and_no_pdf(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            options = ExportOptions(0, [100], 50, 0, 100, root / "out", export_fmt="jpg")
+            result = process_file(src, options)
+            output = options.output_root / "grid_1.jpg"
+            self.assertEqual(result.output_paths, (output,))
+            self.assertTrue(output.exists())
+            self.assertFalse((options.output_root / "grid_1.pdf").exists())
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "JPEG")
+                self.assertEqual(image.size, (394, 197))
+                self.assertAlmostEqual(image.info["dpi"][0], 100, delta=1)
+
+    def test_raster_tiff_outputs_tiff_with_requested_pixels_and_no_pdf(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            options = ExportOptions(0, [100], 50, 0, 100, root / "out", export_fmt="tiff")
+            process_file(src, options)
+            output = options.output_root / "grid_1.tif"
+            self.assertTrue(output.exists())
+            self.assertFalse((options.output_root / "grid_1.pdf").exists())
+            with Image.open(output) as image:
+                self.assertEqual(image.format, "TIFF")
+                self.assertEqual(image.size, (394, 197))
+
+    def test_cmyk_raster_exports_preserve_cmyk_image_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            for export_format, extension in (("jpg", "jpg"), ("tiff", "tif")):
+                output_root = root / export_format
+                process_file(
+                    src,
+                    ExportOptions(
+                        0,
+                        [100],
+                        50,
+                        0,
+                        72,
+                        output_root,
+                        export_fmt=export_format,
+                        color_mode="CMYK",
+                    ),
+                )
+                with Image.open(output_root / f"grid_1.{extension}") as image:
+                    self.assertEqual(image.mode, "CMYK")
+
+    def test_raster_pdf_embeds_requested_pixel_dimensions_after_resize(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=200, height_mm=100)
+            options = ExportOptions(0, [100], 50, 0, 100, root / "out", export_fmt="pdf")
+            process_file(src, options)
+            doc = fitz.open(options.output_root / "grid_1.pdf")
+            try:
+                images = doc.load_page(0).get_images(full=True)
+                self.assertEqual(len(images), 1)
+                self.assertEqual((images[0][2], images[0][3]), (394, 197))
+            finally:
+                doc.close()
+
+    def test_source_open_failure_is_raised(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            options = ExportOptions(0, [100], 50, 0, 72, root / "out")
+            with self.assertRaises(ExportError):
+                process_file(root / "missing.pdf", options)
+
+    def test_existing_outputs_require_explicit_overwrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            options = ExportOptions(0, [100], 50, 0, 72, root / "out")
+            process_file(src, options)
+            with self.assertRaises(ExportError) as caught:
+                process_file(src, options)
+            self.assertIsInstance(caught.exception.__cause__, OutputConflictError)
+            process_file(src, ExportOptions(0, [100], 50, 0, 72, root / "out", overwrite=True))
+
+    def test_cancelled_export_leaves_no_partial_outputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            options = ExportOptions(
+                0,
+                [50, 50],
+                50,
+                0,
+                72,
+                root / "out",
+                cancel_check=lambda: True,
+            )
+            with self.assertRaises(ExportCancelled):
+                process_file(src, options)
+            self.assertFalse((root / "out" / "grid_1.pdf").exists())
+            self.assertFalse((root / "out" / "grid_2.pdf").exists())
+
+    def test_failed_rollback_backup_is_never_deleted_by_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "panel_1.pdf"
+            outputs = StagedOutputSet([final], overwrite=True)
+            backup = outputs._backup_paths[0]
+            backup.write_bytes(b"recoverable old output")
+
+            outputs.cleanup()
+
+            self.assertTrue(backup.exists())
+
+    def test_successful_overwrite_removes_stale_extra_panels(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=150, height_mm=50)
+            process_file(src, ExportOptions(0, [50, 50, 50], 50, 0, 72, root / "out"))
+            self.assertTrue((root / "out" / "grid_3.pdf").exists())
+            process_file(
+                src,
+                ExportOptions(
+                    0,
+                    [75, 75],
+                    50,
+                    0,
+                    72,
+                    root / "out",
+                    overwrite=True,
+                    cleanup_stale=True,
+                ),
+            )
+            self.assertTrue((root / "out" / "grid_1.pdf").exists())
+            self.assertTrue((root / "out" / "grid_2.pdf").exists())
+            self.assertFalse((root / "out" / "grid_3.pdf").exists())
+
+    def test_invalid_overlap_is_rejected_in_core(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            with self.assertRaisesRegex(ExportError, "must be smaller"):
+                process_file(src, ExportOptions(0, [50, 50], 50, 50, 72, root / "out"))
 
 
 if __name__ == "__main__":

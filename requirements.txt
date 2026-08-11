@@ -1,4 +1,7 @@
-PyMuPDF
-Pillow
-tkinterdnd2
-pywin32; platform_system == "Windows"
+PyMuPDF==1.28.2
+Pillow==12.3.0
+tkinterdnd2==0.6.2
+pywin32==312; platform_system == "Windows"
+numpy==2.5.1
+tifffile==2026.7.31
+imagecodecs==2026.6.26

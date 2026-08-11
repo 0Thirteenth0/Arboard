@@ -2,6 +2,11 @@
 
 Track manual and automated test results here.
 
+## 2026-08-09 - Production hardening coverage
+
+- Added tests for streamed TIFF ICC embedding, raster-PDF output intents, blank-output verification, BigTIFF selection, large-job preflight, and layout-template normalization.
+- Final suite, executable build, and packaged launch results are recorded in the development task handoff.
+
 ## 2026-05-19 - Baseline checks
 
 - Prior syntax check passed for `artboard_cutter.py` and `artboard_cutter_gui_advanced.py` before this audit.
@@ -284,3 +289,144 @@ New automated coverage:
 
 - Interactive-style adjacent resize can return the original widths instead of clamping when a drag exceeds the allowed boundary.
 - The protected minimum width can preserve the requested overlap value so preview seam dragging does not shrink overlap near neighboring seams or bleed edges.
+
+## 2026-05-26 - PDF Preserve image input tests
+
+Commands:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest tests.test_export_geometry tests.test_profiles tests.test_settings tests.test_gui_wrappers`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Compile passed.
+- Focused export/profile/settings/wrapper tests passed: 24 tests.
+- Full suite passed: 47 tests, 3 skipped.
+
+New automated coverage:
+
+- PNG input can export through PDF Preserve mode into PDF panel outputs with expected panel dimensions.
+- Legacy `Vector` settings normalize to `PDF Preserve`.
+- PDF Preserve profile mode still forces PDF output and stretch behavior.
+- Blank DPI remains valid for PDF Preserve mode.
+
+## 2026-05-26 - Build and documentation refresh validation
+
+Commands:
+
+- `python tools\generate_icon.py`
+- `pyinstaller --clean --noconfirm ArtboardCutter.spec`
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Icon generation passed.
+- PyInstaller build passed and produced `dist/ArtboardCutter.exe`.
+- Compile passed.
+- Full suite passed: 47 tests, 3 skipped.
+
+## 2026-05-26 - Fixed layout overflow validation
+
+Commands:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Compile passed.
+- Full suite passed: 47 tests, 3 skipped.
+
+Manual validation still needed:
+
+- Shrink the app window and confirm no global horizontal scrollbar appears.
+- Confirm the right-side vertical scrollbar appears only when the control stack is taller than the available window height.
+- Confirm the preview canvas remains usable with its own zoom/pan behavior.
+
+## 2026-05-26 - Theme redesign validation
+
+Commands:
+
+- `python -m compileall -q artboard_cutter_gui_advanced.py src tests`
+- `python -m unittest tests.test_themes`
+- `python -m unittest discover -s tests`
+
+Results:
+
+- Compile passed.
+- Theme tests passed: 6 tests.
+- Full suite passed: 48 tests, 3 skipped.
+
+Covered:
+
+- Required polished themes exist.
+- Central design tokens exist for every built-in theme.
+- Text, input, table, selection, and preview overlay contrast ratios pass.
+
+Manual validation still needed:
+
+- Launch the GUI in a working Tk runtime and visually inspect all themes,
+  especially empty preview state, queue empty state, selected rows, button hover
+  states, right-side scrolling, and long output folder paths.
+## 2026-05-26 - Reference UI polish validation
+
+Commands run:
+
+```powershell
+python -m compileall -q artboard_cutter_gui_advanced.py src tests
+python -m unittest tests.test_themes
+python -m unittest discover -s tests
+python -m unittest tests.test_gui_smoke -v
+```
+
+Results:
+
+- Compile check passed.
+- Theme tests passed: 6 tests.
+- Full unit discovery passed: 48 tests, 3 skipped.
+- Direct GUI smoke file passed through guarded skips: 3 skipped.
+
+Notes:
+
+- The skipped GUI tests still report the local Tcl/Tk `init.tcl` runtime
+  resolution issue before application code can create a Tk root window.
+- Automated checks cover token presence, contrast pairs, and existing export/
+  layout/profile behavior.
+- Manual visual comparison against the reference still requires a working local
+  Tk runtime or packaged executable launch.
+
+## 2026-08-08 - Full improvement pass validation
+
+- Compile passed.
+- Full suite passed in the normal Windows host runtime: 63 tests, 0 failures, 0 skips.
+- Restricted sandbox-equivalent coverage passed 60 tests with 3 guarded GUI/Tk skips caused by sandbox Tcl access.
+- Coverage verifies JPG/TIFF extensions and dimensions, CMYK mode, equal Add Panel distribution, jobs/presets, overlap validation, collision/overwrite behavior, cancellation rollback and backup preservation, stale cleanup, fixtures, visual alignment, themes, and GUI smoke behavior.
+- PyInstaller produced `dist/ArtboardCutter.exe`; a hidden launch stayed alive and was then stopped intentionally.
+- The final package analysis reports no missing `src.artboard_cutter_core` modules after the entry point was changed to explicit imports.
+
+## 2026-08-08 - Empty queue drop-target regression
+
+- Focused GUI/wrapper suite passed: 7 tests.
+- Full Windows suite passed: 64 tests, 0 failures, 0 skips.
+- Verified app initialization registers all three queue layers without a TkDND error.
+- Rebuilt `dist/ArtboardCutter.exe` successfully with the fix.
+
+## 2026-08-08 - Export-only preset scope regression
+
+- Added settings migration that removes legacy artwork dimensions and folder keys from presets.
+- Added a real GUI regression confirming Apply leaves panel widths, artwork height, and output folder unchanged while applying export fields.
+- Focused settings/GUI suite passed: 7 tests.
+- Full Windows suite passed: 65 tests, 0 failures, 0 skips.
+- Rebuilt and smoke-launched `dist/ArtboardCutter.exe` successfully.
+
+## 2026-08-08 - Large CMYK TIFF regression
+
+- Verified the reported first TIFF was uniformly white and the second contained normal artwork.
+- Reproduced the source crop successfully at 5, 25, 75, 100, 125, 140, and 145 DPI; at 150 DPI MuPDF reported `Overly large image` and returned an all-zero 588 MB CMYK pixmap.
+- Added automated coverage for channel-aware safe DPI selection and RGB/CMYK differences.
+- Focused export suite passed: 22 tests.
+- Full Windows suite passed: 67 tests, 0 failures, 0 skips.
+- Rebuilt and smoke-launched `dist/ArtboardCutter.exe` successfully.
+- `git diff --check` passed with line-ending notices only.

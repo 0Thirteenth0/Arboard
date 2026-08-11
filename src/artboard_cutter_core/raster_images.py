@@ -19,11 +19,13 @@ def pixmap_to_pil(pix):
     if pix.alpha:
         im = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
         return im.convert("RGB")
-    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    components = getattr(getattr(pix, "colorspace", None), "n", 3)
+    mode = "CMYK" if components == 4 else ("L" if components == 1 else "RGB")
+    return Image.frombytes(mode, (pix.width, pix.height), pix.samples)
 
 
-def _save_tiff_with_retries(im, out_path, dpi_int: int, log_cb=None):
-    if im.mode not in ("RGB", "L"):
+def _save_tiff_with_retries(im, out_path, dpi_int: int, log_cb=None, icc_profile=None):
+    if im.mode not in ("RGB", "CMYK", "L"):
         im = im.convert("RGB")
 
     compressions = [
@@ -39,6 +41,8 @@ def _save_tiff_with_retries(im, out_path, dpi_int: int, log_cb=None):
         for label, extra in compressions:
             kwargs = dict(extra)
             kwargs["dpi"] = (dpi_int, dpi_int)
+            if icc_profile:
+                kwargs["icc_profile"] = icc_profile
             if big:
                 kwargs["bigtiff"] = True
 
@@ -61,31 +65,26 @@ def _save_tiff_with_retries(im, out_path, dpi_int: int, log_cb=None):
     raise last_err
 
 
-def _save_jpg_with_dpi(im, out_path, dpi_int: int):
-    if im.mode != "RGB":
+def _save_jpg_with_dpi(im, out_path, dpi_int: int, icc_profile=None):
+    if im.mode not in ("RGB", "CMYK"):
         im = im.convert("RGB")
-    im.save(
-        str(out_path),
-        format="JPEG",
-        quality=95,
-        subsampling=0,
-        dpi=(dpi_int, dpi_int),
-        optimize=True,
-    )
+    kwargs = dict(quality=95, subsampling=0, dpi=(dpi_int, dpi_int), optimize=True)
+    if icc_profile:
+        kwargs["icc_profile"] = icc_profile
+    im.save(str(out_path), format="JPEG", **kwargs)
 
 
-def save_raster_pil(im, out_path, fmt_lower: str, dpi_int: int, log_cb=None):
+def save_raster_pil(im, out_path, fmt_lower: str, dpi_int: int, log_cb=None, icc_profile=None):
     fmt_lower = (fmt_lower or "pdf").lower()
     if fmt_lower in ("jpg", "jpeg"):
-        _save_jpg_with_dpi(im, out_path, dpi_int)
+        _save_jpg_with_dpi(im, out_path, dpi_int, icc_profile)
         return
     if fmt_lower in ("tif", "tiff"):
         if not PIL_AVAILABLE:
             raise RuntimeError("TIFF export requires Pillow. Install with: pip install Pillow")
-        _save_tiff_with_retries(im, out_path, dpi_int, log_cb)
+        _save_tiff_with_retries(im, out_path, dpi_int, log_cb, icc_profile)
         return
     try:
         im.save(str(out_path), dpi=(dpi_int, dpi_int))
     except Exception:
         im.save(str(out_path))
-

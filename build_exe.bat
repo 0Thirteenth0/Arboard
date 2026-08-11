@@ -2,24 +2,26 @@
 setlocal
 
 REM Build Windows .exe for Artboard Cutter
-REM Prereqs: Python 3.9+ installed and on PATH
+REM Prereq: Python 3.10+ installed and on PATH
 
-echo [1/4] Upgrading pip (optional)...
-python -m pip install --upgrade pip >nul 2>&1
-
-echo [2/4] Installing build dependencies...
-python -m pip install pyinstaller >nul 2>&1
-if exist requirements.txt (
-  python -m pip install -r requirements.txt
+if not exist .venv\Scripts\python.exe (
+  echo [1/5] Creating isolated build environment...
+  python -m venv .venv
 ) else (
-  python -m pip install PyMuPDF Pillow tkinterdnd2
+  echo [1/5] Using existing isolated build environment...
 )
 
+echo [2/5] Installing pinned build dependencies...
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+if errorlevel 1 exit /b 1
+
 echo [3/5] Generating application icon...
-python tools\generate_icon.py
+.venv\Scripts\python.exe tools\generate_icon.py
+if errorlevel 1 exit /b 1
 
 echo [4/5] Building executable...
-pyinstaller --clean --noconfirm ArtboardCutter.spec
+.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm ArtboardCutter.spec
+if errorlevel 1 exit /b 1
 
 echo [5/5] Done.
 echo Output: dist\ArtboardCutter.exe

@@ -231,3 +231,101 @@ Core panel-editing helpers now live in `src/artboard_cutter_core/layout.py`:
 - `resize_adjacent_panel_widths()`
 
 These helpers are independent of tkinter so future preview/editor features can share tested geometry behavior with the GUI.
+
+## 2026-05-26 - PDF Preserve export mode
+
+The fast PDF export path is now exposed as `PDF Preserve` in the UI.
+
+Compatibility:
+
+- Legacy profile/settings values of `Vector` normalize to `PDF Preserve`.
+- The engine still uses `ExportOptions.preserve_vectors` internally to minimize churn in export call sites.
+
+Behavior:
+
+- PDF and AI-compatible PDF inputs are clipped through the existing stretch-master PDF pipeline, preserving vector operators where PyMuPDF can preserve them.
+- Raster image inputs are converted by PyMuPDF to an in-memory PDF document before the same stretch-master pipeline runs.
+- Raster image inputs remain embedded raster content inside PDF panels; no tracing/vectorization is attempted.
+- JPG/TIFF output still requires Raster mode because those formats have no vector-preserving container.
+
+## 2026-05-26 - Fixed two-column root layout
+
+The global app scroll viewport was removed after review because root-level
+horizontal and vertical scrollbars made the application feel like a web page
+instead of a desktop production tool.
+
+Current tkinter layout:
+
+- The root window uses a fixed grid: topbar row plus a full-height horizontal
+  `ttk.Panedwindow` body.
+- The left pane contains the Live Preview label frame, a compact preview toolbar,
+  and the preview canvas. Preview overflow remains handled by preview zoom/pan.
+- The right pane contains a canvas-backed vertical scroll viewport for controls
+  only: artwork queue, export settings, run controls, and activity log.
+- The artwork queue keeps its own internal `ttk.Treeview` scrollbar.
+- No global horizontal scrollbar is created.
+- The right-side scrollbar is hidden when the control stack fits and shown only
+  when the available window height is too short.
+
+## 2026-05-26 - Theme token redesign
+
+The theme system now exposes richer design tokens while preserving old aliases
+used by existing code and tests.
+
+Primary token groups:
+
+- app background and card surfaces
+- borders and stronger borders
+- primary/secondary text
+- accent and accent hover
+- button and input states
+- table background/header/selection
+- warning/error/success
+- preview workspace and overlay colors
+
+Built-in themes now include the requested production-tool set:
+
+- Soft Blue
+- Minimal Light
+- Dark Pro
+- Industrial Gray
+- Blueprint
+
+Legacy theme names remain available for compatibility. `dark` maps to Dark Pro,
+`light` maps to Minimal Light, and invalid theme names fall back to Soft Blue.
+
+The tkinter styling layer still uses `ttk`, but styles are now driven by the
+central token dictionary instead of scattered one-off color choices.
+
+## 2026-05-26 - Reference-style UI polish
+
+The current UI remains tkinter/ttk, but the visual structure now follows a
+card-based production-tool layout:
+
+- Major sections are explicit card frames instead of relying on heavy nested
+  `ttk.LabelFrame` borders.
+- Theme tokens now include app, card, canvas, button, primary button, input,
+  table, scrollbar, status, and preview-specific aliases.
+- Field labels use card-surface label styles so labels no longer look selected
+  or highlighted when nested inside settings rows.
+- Local action icons live under `assets/icons/` and are loaded with the same
+  `resource_path()` helper used by packaged builds.
+- The PyInstaller spec bundles `assets/icons/` so packaged executables can load
+  UI button icons without network access or extra dependencies.
+
+## 2026-08-08 - Reliability and workflow architecture
+
+- `validation.py` is the shared validation boundary for GUI and engine exports.
+- `output_io.py` centrally builds extensions and stages every panel before atomically replacing an output set. Existing panels are restored if commit fails; stale panels are removed only after success.
+- GUI workers deliver import, preview, and export results through a main-thread event queue; `concurrency.py` serializes PyMuPDF operations.
+- `jobs.py` atomically stores complete queue profiles in versioned `.artboard-job.json` files. Named presets remain in AppData settings.
+- Raster rendering combines resize and requested DPI in one PyMuPDF matrix. The shared Pillow adapter writes explicit JPG/TIFF files and preserves RGB/CMYK where supported.
+- Rotating runtime logs live under `%LOCALAPPDATA%\ArtboardCutter\logs`, with a temporary-directory fallback.
+
+## 2026-08-08 - Large CMYK raster safety
+
+- Raster limits now account for uncompressed render bytes, not only pixel count. CMYK uses four channels and therefore reaches MuPDF's internal image limit earlier than RGB.
+- JPG and raster-PDF jobs calculate one effective safe DPI from the largest panel and apply it to the complete set. TIFF writes bounded strips and retains the requested DPI, selecting BigTIFF when the uncompressed sample size requires it.
+- Staged verification runs before transactional commit. TIFF uniformity checks decode one strip at a time so verification does not undo the bounded-memory design.
+- ICC handling supports conversion or assignment, embeds profiles in JPG/TIFF, and adds a PDF output intent for raster PDF.
+- A high-resolution unicolor result is compared with a low-resolution render of the same crop. If the low-resolution crop contains artwork, the high-resolution result is treated as MuPDF's silent blank failure and the transactional export is aborted.

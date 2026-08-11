@@ -2,6 +2,13 @@
 
 Track AI-assisted work sessions here.
 
+## 2026-08-09 - Production hardening pass
+
+- Replaced full-frame TIFF rendering with bounded 256-row Deflate strips and automatic BigTIFF selection.
+- Added staged output verification, ICC conversion/assignment, embedded JPG/TIFF profiles, and PDF output intents.
+- Added job/disk preflight, direct panel count, proportional layout templates, expanded export-only presets, retry/resume, and abnormal-shutdown recovery.
+- Added version 1.1.0 release metadata, an Inno Setup definition, optional Authenticode signing, and update-manifest support.
+
 ## 2026-05-19 - Rebuild audit kickoff
 
 - Read the current source of truth: `artboard_cutter_gui_advanced.py`.
@@ -268,3 +275,82 @@ Track AI-assisted work sessions here.
 - Kept export/layout behavior unchanged for manually typed extreme values; the protection is specific to interactive preview editing.
 - Added tests for non-clamping drag reset behavior and overlap-preserving minimum width behavior.
 - Validation run: compile passed; full unit suite passed with 46 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - PDF Preserve mode for raster image inputs
+
+- Renamed the user-facing fast PDF export mode from `Vector` to `PDF Preserve` while keeping legacy `Vector` settings compatible.
+- Added export-mode normalization so old AppData values load as `PDF Preserve` and new settings save with the clearer name.
+- Updated the fast PDF export path to convert non-PDF sources such as PNG/JPG/TIFF into an in-memory PDF before using the existing stretch-and-clip pipeline.
+- Clarified that raster image inputs remain embedded raster images inside PDF panels; they do not become editable vector paths.
+- Added regression coverage for PNG input exported through PDF Preserve mode.
+- Validation run: compile passed; full unit suite passed with 47 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - PDF Preserve build and documentation refresh
+
+- Rebuilt `dist/ArtboardCutter.exe` with PyInstaller after the PDF Preserve and interactive preview changes.
+- Updated README feature notes to include interactive preview panel editing and the raster-image limitation of PDF Preserve mode.
+- Updated `docs/testing.md` to use Raster/PDF Preserve terminology, include raster image PDF Preserve checks, and list interactive preview editing checks.
+- Updated the GUI subtitle from vector-stretched panel exports to PDF-preserved panel exports.
+- Validation run: compile passed; full unit suite passed with 47 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - Fixed two-column layout with right-side scrolling
+
+- Removed the global root-window scroll canvas and its bottom horizontal scrollbar.
+- Restored a fixed desktop-style layout: topbar plus a two-column horizontal paned body.
+- Kept Live Preview on the left with its own toolbar and canvas-based pan/zoom behavior.
+- Moved queue, export settings, run controls, and Activity Log into a right-side control viewport that scrolls vertically only when the window is too short.
+- Kept the artwork queue's own internal scrollbar independent from the right-side control scrollbar.
+- Updated `docs/testing.md` with manual validation for no global scrollbars and right-side-only overflow.
+- Validation run: compile passed; full unit suite passed with 47 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - Theme and visual design refresh
+
+- Rebuilt `src/artboard_cutter_core/themes.py` around centralized design tokens for surfaces, text, borders, accent states, inputs, tables, selections, status colors, and preview overlays.
+- Added the requested polished theme set: Soft Blue, Minimal Light, Dark Pro, Industrial Gray, and Blueprint.
+- Kept legacy themes and old token aliases so saved preferences and existing UI references remain compatible.
+- Updated `apply_theme()` to style buttons, accent buttons, inputs, comboboxes, radio buttons, tree headings, rows, progress bars, text widgets, and canvases from the token system.
+- Added a preview empty state with a workspace border, icon, message, and interaction tip.
+- Added an artwork queue empty-state message.
+- Refined spacing in preview toolbar, queue buttons, export settings rows, and run controls.
+- Validation run: compile passed; full unit suite passed with 48 tests and the existing 3 guarded GUI/Tk skips.
+
+## 2026-05-26 - Reference-matched UI polish pass
+
+- Added local PNG action icons under `assets/icons/` for queue actions, preview
+  tools, export, logs, browse, and section headers.
+- Updated the PyInstaller spec to bundle `assets/icons/` with packaged builds.
+- Reworked the main visual sections into softer card frames with explicit
+  section headers, reduced nested borders, and cleaner button groups.
+- Added icon+text buttons for Add Files, Remove, Clear, Check All, Uncheck All,
+  Check Selected, Add Panel, Start Export, Open Logs Folder, and Browse.
+- Expanded theme aliases to expose app/card/canvas/button/input/table/scrollbar
+  tokens while keeping old token names compatible.
+- Fixed the label-background source of the highlighted-text look by using
+  explicit field/card/root/toolbar label styles.
+- Updated the preview empty state and queue empty state to better match the
+  Soft Blue design reference.
+
+## 2026-08-08 - Reliability and usability implementation
+
+- Corrected Raster export so JPG creates `.jpg` and TIFF creates `.tif`; neither selection emits PDF.
+- Corrected DPI math after confirming PyMuPDF ignores `matrix` when `dpi` is also supplied.
+- Replaced Add Panel's last-panel split rule with equal redistribution of total artwork width.
+- Added transactional outputs, overwrite/stale-file preflight, clear validation, error states, cancellation, background import/preview/export, and serialized PDF operations.
+- Added color mode, presets, saved jobs, recent paths, rotating AppData logs, safer defaults, pinned dependencies, and versioned packaging.
+- Added regression tests and rebuilt/smoke-tested `dist/ArtboardCutter.exe`.
+
+## 2026-08-08 - Blank first CMYK TIFF diagnosis
+
+- Inspected a 20,552 x 41,339 source JPG and two generated CMYK TIFF panels.
+- Confirmed panel 1 was all-white while panel 2 contained artwork; crop geometry and PDF Preserve output were correct.
+- Reproduced MuPDF's `Overly large image` behavior: the 7,034 x 20,906 CMYK render required about 588 MB and MuPDF returned all-zero pixels without raising. The same crop rendered correctly through 145 DPI.
+- Replaced the pixel-only cap with a channel-aware 500 MB render cap. This job now selects 138 DPI consistently for both panels instead of producing a blank 150 DPI first panel.
+- Added a low-resolution content check to prevent any similar silent blank render from being saved.
+- Corrected a PyInstaller lazy-import warning by making the packaged entry point import core modules explicitly; the final missing-module report is clean for application modules.
+
+## 2026-08-08 - Queue empty-state drag-and-drop fix
+
+- Fixed the centered empty-queue label intercepting file drops intended for the Treeview beneath it.
+- Registered the queue container, Treeview, and empty-state label as equivalent file-drop targets.
+- Stopped stripping literal braces after Tcl path parsing, preserving valid filenames such as `{proof}.pdf`.
+- Added a regression test covering all visible queue layers and rebuilt the executable.

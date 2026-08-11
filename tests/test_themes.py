@@ -28,6 +28,11 @@ def contrast_ratio(foreground: str, background: str) -> float:
 class ThemeTests(unittest.TestCase):
     def test_required_themes_exist(self):
         for name in [
+            "Soft Blue",
+            "Minimal Light",
+            "Dark Pro",
+            "Industrial Gray",
+            "Blueprint",
             "Professional Dark",
             "Professional Light",
             "Graphite",
@@ -40,9 +45,44 @@ class ThemeTests(unittest.TestCase):
             self.assertIn(name, THEME_NAMES)
 
     def test_legacy_and_invalid_theme_fallback(self):
-        self.assertEqual(normalize_theme_name("dark"), "Professional Dark")
-        self.assertEqual(normalize_theme_name("light"), "Professional Light")
-        self.assertEqual(normalize_theme_name("missing"), "Professional Dark")
+        self.assertEqual(normalize_theme_name("dark"), "Dark Pro")
+        self.assertEqual(normalize_theme_name("light"), "Minimal Light")
+        self.assertEqual(normalize_theme_name("missing"), "Soft Blue")
+
+    def test_design_tokens_are_defined(self):
+        required = [
+            "app_bg",
+            "background",
+            "card_bg",
+            "card_border",
+            "canvas_bg",
+            "surface",
+            "surface_raised",
+            "border",
+            "text_primary",
+            "text_secondary",
+            "text_muted",
+            "accent",
+            "accent_hover",
+            "button_bg",
+            "button_hover",
+            "primary_button_bg",
+            "primary_button_hover",
+            "input_bg",
+            "input_border",
+            "table_header_bg",
+            "table_row_bg",
+            "table_selected_bg",
+            "scrollbar",
+            "selection_bg",
+            "warning",
+            "error",
+            "success",
+        ]
+        for name in THEME_NAMES:
+            colors = get_theme(name).colors
+            for token in required:
+                self.assertIn(token, colors, f"{name} missing token {token}")
 
     def test_preview_tokens_are_defined(self):
         for name in THEME_NAMES:
@@ -68,6 +108,12 @@ class ThemeTests(unittest.TestCase):
             ("tree_head_fg", "tree_head_bg", 4.5),
             ("fg", "tree_bg", 4.5),
             ("sel_fg", "sel_bg", 4.5),
+            ("text_primary", "card_bg", 4.5),
+            ("text_muted", "card_bg", 4.5),
+            ("text_primary", "button_bg", 4.5),
+            ("text_primary", "input_bg", 4.5),
+            ("text_primary", "table_header_bg", 4.5),
+            ("table_selected_fg", "table_selected_bg", 4.5),
             ("preview_label_fg", "preview_label_bg", 4.5),
         ]
         for name in THEME_NAMES:

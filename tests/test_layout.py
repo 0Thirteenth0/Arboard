@@ -1,6 +1,7 @@
 import unittest
 
 from src.artboard_cutter_core.layout import (
+    add_evenly_distributed_panel,
     compute_panel_layout,
     parse_widths_list,
     resize_adjacent_panel_widths,
@@ -57,6 +58,11 @@ class PanelLayoutTests(unittest.TestCase):
         widths = split_last_panel_width([1200, 1200, 1100])
         self.assertEqual(widths, [1200.0, 1200.0, 550.0, 550.0])
         self.assertEqual(sum(widths), 3500.0)
+
+    def test_add_panel_redistributes_entire_artwork_evenly(self):
+        widths = add_evenly_distributed_panel([1200, 800, 400])
+        self.assertEqual(widths, [600.0, 600.0, 600.0, 600.0])
+        self.assertEqual(sum(widths), 2400.0)
 
     def test_resize_adjacent_panel_widths_preserves_total_width(self):
         widths = resize_adjacent_panel_widths([1000, 800, 600], 0, 125)

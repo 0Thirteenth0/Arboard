@@ -39,3 +39,11 @@ These were initial audit risks. Several have since been addressed by the rebuild
 - Illustrator fallback behavior is covered for non-AI files and `require_running=True` without a running Illustrator process.
 - `docs/testing.md` now documents Tcl/Tk setup checks, manual GUI validation, preview/export equivalence checks, queue widget limits, Illustrator requirements, and runtime log access.
 - Vector export with blank DPI no longer fails validation; Raster still requires DPI.
+
+## 2026-08-08 - Remaining limitations
+
+- ICC conversion can use an embedded RGB raster profile or an sRGB working-space assumption. PDF/AI source profiles are not fully discoverable through the current renderer, so confirm the assumed source space for color-critical legacy files.
+- PDF Preserve fidelity for Illustrator-only constructs, linked assets, spot colors, overprint, transparency, and editability still requires representative customer artwork.
+- The reproducible, versioned executable is not digitally signed because no code-signing certificate was supplied.
+- The normal Windows host passed all GUI tests. A restricted sandbox may skip them because it cannot read the host Tcl library.
+- Final production acceptance still requires visual/RIP checks for extreme dimensions, high DPI, BigTIFF, and real large-format jobs.

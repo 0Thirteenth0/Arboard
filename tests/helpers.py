@@ -4,7 +4,10 @@ import math
 import sys
 from pathlib import Path
 
-import fitz
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # type: ignore
 
 from src.artboard_cutter_core.units import mm_to_pt
 

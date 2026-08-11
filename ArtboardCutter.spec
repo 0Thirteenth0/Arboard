@@ -5,12 +5,14 @@ datas = []
 binaries = []
 hiddenimports = []
 datas += [('assets/artboard_cutter.ico', 'assets')]
-tmp_ret = collect_all('fitz')
+datas += [('assets/icons', 'assets/icons')]
+tmp_ret = collect_all('pymupdf')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('PIL')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('tkinterdnd2')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports += ['imagecodecs._shared_cython', 'imagecodecs._zlib']
 
 
 a = Analysis(
@@ -48,4 +50,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='assets/artboard_cutter.ico',
+    version='version_info.txt',
 )

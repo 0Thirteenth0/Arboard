@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import threading
+import queue
 import os
 import subprocess
 import sys
+import tempfile
+import traceback
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 # Optional drag-and-drop support
 try:
@@ -17,33 +20,53 @@ except Exception:
     DND_AVAILABLE = False
     DND_FILES = None
 
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz
+except ImportError:  # PyMuPDF before the pymupdf import name was introduced.
+    import fitz  # type: ignore
 
-from src.artboard_cutter_core import (
-    ArtworkProfile,
-    ExportOptions,
+from src.artboard_cutter_core.concurrency import PDF_OPERATION_LOCK
+from src.artboard_cutter_core.errors import ExportCancelled
+from src.artboard_cutter_core.export import ExportOptions, process_file as core_process_file
+from src.artboard_cutter_core.layout import (
+    add_evenly_distributed_panel as core_add_evenly_distributed_panel,
     compute_panel_layout as core_compute_panel_layout,
-    compute_scale_matrix as core_compute_scale_matrix,
-    create_artwork_profiles as core_create_artwork_profiles,
-    estimate_pixels as core_estimate_pixels,
-    fmt_mm as core_fmt_mm,
-    force_page_boxes as core_force_page_boxes,
-    mm_to_pt as core_mm_to_pt,
-    open_pdf_robust as core_open_pdf_robust,
+    compute_preview_page_height,
     parse_widths_list as core_parse_widths_list,
-    process_file as core_process_file,
-    pt_to_mm as core_pt_to_mm,
     resize_adjacent_panel_widths as core_resize_adjacent_panel_widths,
-    split_last_panel_width as core_split_last_panel_width,
+    redistribute_panel_widths as core_redistribute_panel_widths,
+)
+from src.artboard_cutter_core.color_management import ICC_MODES, RENDERING_INTENTS
+from src.artboard_cutter_core.modes import (
+    PDF_PRESERVE_EXPORT_MODE,
+    is_pdf_preserve_mode as core_is_pdf_preserve_mode,
+    normalize_export_mode as core_normalize_export_mode,
+)
+from src.artboard_cutter_core.output_io import build_output_paths, find_duplicate_paths, find_stale_panel_outputs
+from src.artboard_cutter_core.validation import validate_export_values
+from src.artboard_cutter_core.illustrator_integration import get_illustrator_artboard_names
+from src.artboard_cutter_core.jobs import default_recovery_job_path, load_job, save_job
+from src.artboard_cutter_core.preflight import estimate_export_job, format_bytes
+from src.artboard_cutter_core.pdf_io import force_page_boxes as core_force_page_boxes, open_pdf_robust as core_open_pdf_robust
+from src.artboard_cutter_core.profiles import (
+    ArtworkProfile,
+    create_artwork_profiles as core_create_artwork_profiles,
+    sanitize_output_name,
     validate_output_name as core_validate_output_name,
 )
-from src.artboard_cutter_core.layout import compute_preview_page_height
-from src.artboard_cutter_core.illustrator_integration import get_illustrator_artboard_names
-from src.artboard_cutter_core.profiles import sanitize_output_name
 from src.artboard_cutter_core.raster_export import export_artboards_streaming_from_src as core_export_raster
-from src.artboard_cutter_core.settings import AppSettings, load_settings, save_settings
+from src.artboard_cutter_core.raster_images import pixmap_to_pil
+from src.artboard_cutter_core.settings import AppSettings, default_log_dir, default_output_dir, load_settings, save_settings
 from src.artboard_cutter_core.themes import THEME_NAMES, get_theme, normalize_theme_name
+from src.artboard_cutter_core.units import (
+    compute_scale_matrix as core_compute_scale_matrix,
+    estimate_pixels as core_estimate_pixels,
+    fmt_mm as core_fmt_mm,
+    mm_to_pt as core_mm_to_pt,
+    pt_to_mm as core_pt_to_mm,
+)
 from src.artboard_cutter_core.vector_export import export_artboards_vector_uniform as core_export_vector
+from src.artboard_cutter_core.version import APP_VERSION
 
 # --- TIFF / JPG helpers via Pillow (NO TiffImagePlugin usage) ---
 try:
@@ -63,95 +86,7 @@ try:
 except Exception:
     IMAGE_TK_AVAILABLE = False
 
-def pixmap_to_pil(pix):
-    """Convert a PyMuPDF Pixmap to a Pillow Image, forcing RGB (drop alpha)."""
-    if pix.alpha:
-        im = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
-        return im.convert("RGB")
-    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-
-def _save_tiff_with_retries(im, out_path, dpi_int: int, log_cb=None):
-    """
-    Save a Pillow image as TIFF robustly, without importing TiffImagePlugin:
-      - Force RGB/L
-      - Try BigTIFF first, then normal TIFF
-      - Try multiple compressions
-      - Always write DPI
-    """
-    if im.mode not in ("RGB", "L"):
-        im = im.convert("RGB")
-
-    compressions = [
-        ("tiff_lzw", {"compression": "tiff_lzw"}),
-        ("tiff_adobe_deflate", {"compression": "tiff_adobe_deflate"}),
-        ("tiff_deflate", {"compression": "tiff_deflate"}),
-        ("packbits", {"compression": "packbits"}),
-        ("uncompressed", {}),
-    ]
-
-    last_err = None
-    for big in (True, False):  # try BigTIFF first
-        for label, extra in compressions:
-            kwargs = dict(extra)
-            kwargs["dpi"] = (dpi_int, dpi_int)
-            if big:
-                kwargs["bigtiff"] = True  # some Pillow builds may not accept; we catch TypeError
-
-            try:
-                im.save(str(out_path), format="TIFF", **kwargs)
-                if log_cb:
-                    log_cb(f"[TIFF] saved with {label}{' + BigTIFF' if big else ''}")
-                return
-            except TypeError as e:
-                # If Pillow doesn't accept 'bigtiff', continue without it on later attempts
-                if "bigtiff" in str(e).lower():
-                    continue
-                last_err = e
-                if log_cb:
-                    log_cb(f"[TIFF] retry ({label}{' + BigTIFF' if big else ''}) failed: {e}")
-            except Exception as e:
-                last_err = e
-                if log_cb:
-                    log_cb(f"[TIFF] retry ({label}{' + BigTIFF' if big else ''}) failed: {e}")
-
-    raise last_err
-
-def _save_jpg_with_dpi(im, out_path, dpi_int: int):
-    """Save JPEG with explicit DPI and high quality (no chroma subsampling)."""
-    if im.mode != "RGB":
-        im = im.convert("RGB")
-    im.save(
-        str(out_path),
-        format="JPEG",
-        quality=95,
-        subsampling=0,
-        dpi=(dpi_int, dpi_int),
-        optimize=True,
-    )
-
-def save_raster_pil(im, out_path, fmt_lower: str, dpi_int: int, log_cb=None):
-    """
-    Save via Pillow with DPI for JPG / TIFF; generic save for PNG, etc.
-    """
-    fmt_lower = (fmt_lower or "pdf").lower()
-    if fmt_lower in ("jpg", "jpeg"):
-        _save_jpg_with_dpi(im, out_path, dpi_int)
-        return
-    if fmt_lower in ("tif", "tiff"):
-        if not PIL_AVAILABLE:
-            raise RuntimeError("TIFF export requires Pillow. Install with: pip install Pillow")
-        _save_tiff_with_retries(im, out_path, dpi_int, log_cb)
-        return
-    # default: try Pillow's generic save with DPI if supported
-    try:
-        im.save(str(out_path), dpi=(dpi_int, dpi_int))
-    except Exception:
-        im.save(str(out_path))
-
-
 # ---------------------- Units & helpers ----------------------
-PT_PER_MM = 72.0 / 25.4
-MAX_MP = 150  # safety cap per render in megapixels (per panel)
 
 def mm_to_pt(mm: float) -> float:
     return core_mm_to_pt(mm)
@@ -189,6 +124,9 @@ def normalize_overlap_mode(mode: str) -> str:
 
 def overlap_mode_key(mode: str) -> str:
     return "left" if normalize_overlap_mode(mode) == "Left" else "shared"
+
+def normalize_export_mode(mode: str) -> str:
+    return core_normalize_export_mode(mode)
 
 def compute_panel_layout(widths_mm, bleed_mm, overlap_mm, overlap_mode="Shared"):
     """
@@ -272,6 +210,14 @@ def process_file(
     vector_fit_mode: str = "stretch",  # "stretch", "height", or "width"
     page_index: int = 0,
     output_name: str | None = None,
+    overwrite: bool = False,
+    cleanup_stale: bool = False,
+    cancel_check=None,
+    color_mode: str = "RGB",
+    icc_mode: str = "Off",
+    icc_profile_path: str = "",
+    rendering_intent: str = "Perceptual",
+    verify_outputs: bool = True,
     log_cb=None,
 ):
     return core_process_file(
@@ -289,6 +235,14 @@ def process_file(
             vector_fit_mode=vector_fit_mode,
             page_index=page_index,
             output_name=output_name,
+            overwrite=overwrite,
+            cleanup_stale=cleanup_stale,
+            cancel_check=cancel_check,
+            color_mode=color_mode,
+            icc_mode=icc_mode,
+            icc_profile_path=icc_profile_path,
+            rendering_intent=rendering_intent,
+            verify_outputs=verify_outputs,
         ),
         log_cb=log_cb,
     )
@@ -300,125 +254,241 @@ def apply_theme(root: tk.Tk, style: ttk.Style, theme_name: str):
     C = theme.colors
     root._theme_tokens = C
     # base window + text
-    root.configure(bg=C["bg"])
+    root.configure(bg=C["app_bg"])
     root.option_clear()
     style.theme_use("clam")
 
     # General fonts/colors
-    style.configure(".", background=C["panel"], foreground=C["fg"])
+    font = ("Segoe UI", 9)
+    style.configure(
+        ".",
+        background=C["card_bg"],
+        foreground=C["text_primary"],
+        font=font,
+        bordercolor=C["card_border"],
+        lightcolor=C["card_border"],
+        darkcolor=C["card_border"],
+    )
 
     # Containers / frames
-    for elem in ("TFrame", "TLabelframe", "TLabelframe.Label"):
-        style.configure(elem, background=C["panel"], foreground=C["fg"])
+    style.configure("TFrame", background=C["app_bg"])
+    style.configure("Root.TFrame", background=C["app_bg"])
+    style.configure("CardBody.TFrame", background=C["card_bg"])
+    style.configure("Toolbar.TFrame", background=C["toolbar_bg"])
+    style.configure("FieldGrid.TFrame", background=C["card_bg"])
+    style.configure(
+        "Card.TFrame",
+        background=C["card_bg"],
+        bordercolor=C["card_border"],
+        relief="solid",
+        borderwidth=1,
+    )
+    style.configure(
+        "TLabelframe",
+        background=C["card_bg"],
+        foreground=C["text_primary"],
+        bordercolor=C["card_border"],
+        relief="solid",
+        borderwidth=1,
+    )
+    style.configure(
+        "TLabelframe.Label",
+        background=C["card_bg"],
+        foreground=C["text_primary"],
+        font=("Segoe UI", 10, "bold"),
+    )
 
     # Labels
-    style.configure("TLabel", background=C["panel"], foreground=C["fg"])
-    style.configure("Title.TLabel", background=C["panel"], foreground=C["fg"], font=("Segoe UI", 15, "bold"))
-    style.configure("Muted.TLabel", background=C["panel"], foreground=C["muted"])
+    style.configure("TLabel", background=C["card_bg"], foreground=C["text_primary"])
+    style.configure("Root.TLabel", background=C["app_bg"], foreground=C["text_primary"])
+    style.configure("Title.TLabel", background=C["app_bg"], foreground=C["text_primary"], font=("Segoe UI", 15, "bold"))
+    style.configure("Muted.TLabel", background=C["card_bg"], foreground=C["text_secondary"])
+    style.configure("RootMuted.TLabel", background=C["app_bg"], foreground=C["text_secondary"])
+    style.configure("Section.TLabel", background=C["card_bg"], foreground=C["text_primary"], font=("Segoe UI", 10, "bold"))
+    style.configure("Field.TLabel", background=C["card_bg"], foreground=C["text_primary"])
+    style.configure("Toolbar.TLabel", background=C["toolbar_bg"], foreground=C["text_primary"])
+    style.configure("ToolbarMuted.TLabel", background=C["toolbar_bg"], foreground=C["text_secondary"])
+    style.configure("Empty.TLabel", background=C["table_row_bg"], foreground=C["text_secondary"], font=("Segoe UI", 10))
+    style.configure("Badge.TLabel", background=C["tip_bg"], foreground=C["text_secondary"], padding=(6, 2))
 
     # Buttons
-    button_hover = C.get("tree_head_bg", C["entry_bg"])
-    style.configure("TButton", background=C["panel"], foreground=C["fg"], bordercolor=C["border"], focusthickness=1)
-    style.configure("Accent.TButton", background=C["accent"], foreground="#ffffff", bordercolor=C["accent"], focusthickness=1)
+    button_hover = C["button_hover"]
+    style.configure(
+        "TButton",
+        background=C["button_bg"],
+        foreground=C["text_primary"],
+        bordercolor=C["button_border"],
+        focusthickness=1,
+        padding=(11, 7),
+        relief="flat",
+    )
+    style.configure(
+        "Tool.TButton",
+        background=C["button_bg"],
+        foreground=C["text_primary"],
+        bordercolor=C["button_border"],
+        padding=(8, 6),
+        relief="flat",
+    )
+    style.configure(
+        "Danger.TButton",
+        background=C["button_bg"],
+        foreground=C["danger"],
+        bordercolor=C["button_border"],
+        padding=(11, 7),
+        relief="flat",
+    )
+    style.configure(
+        "Accent.TButton",
+        background=C["primary_button_bg"],
+        foreground="#ffffff",
+        bordercolor=C["primary_button_bg"],
+        focusthickness=1,
+        padding=(13, 8),
+        relief="flat",
+    )
     style.map("TButton",
-              background=[("disabled", C["panel"]), ("active", button_hover), ("pressed", C["sel_bg"])],
-              foreground=[("disabled", C["muted"]), ("active", C["fg"]), ("pressed", C["sel_fg"])],
+              background=[("disabled", C["card_bg_raised"]), ("active", button_hover), ("pressed", C["selection_bg"])],
+              foreground=[("disabled", C["text_secondary"]), ("active", C["text_primary"]), ("pressed", C["selection_fg"])],
               bordercolor=[("active", C["accent"]), ("pressed", C["accent"])],
-              relief=[("pressed", "sunken")])
+              relief=[("pressed", "flat")])
+    style.map("Tool.TButton",
+              background=[("disabled", C["card_bg_raised"]), ("active", button_hover), ("pressed", C["selection_bg"])],
+              foreground=[("disabled", C["text_secondary"]), ("active", C["text_primary"]), ("pressed", C["selection_fg"])],
+              bordercolor=[("active", C["accent"]), ("pressed", C["accent"])])
+    style.map("Danger.TButton",
+              background=[("disabled", C["card_bg_raised"]), ("active", button_hover), ("pressed", C["selection_bg"])],
+              foreground=[("disabled", C["text_secondary"]), ("active", C["danger"]), ("pressed", C["danger"])],
+              bordercolor=[("active", C["danger"]), ("pressed", C["danger"])])
     style.map("Accent.TButton",
-              background=[("disabled", C["panel"]), ("active", C["sel_bg"]), ("pressed", C["accent"])],
-              foreground=[("disabled", C["muted"]), ("active", C["sel_fg"]), ("pressed", "#ffffff")],
-              bordercolor=[("active", C["sel_fg"]), ("pressed", C["accent"])])
+              background=[("disabled", C["card_bg_raised"]), ("active", C["primary_button_hover"]), ("pressed", C["primary_button_bg"])],
+              foreground=[("disabled", C["text_secondary"]), ("active", "#ffffff"), ("pressed", "#ffffff")],
+              bordercolor=[("active", C["primary_button_hover"]), ("pressed", C["primary_button_bg"])])
 
     # Entries / Combobox
-    style.configure("TEntry", fieldbackground=C["entry_bg"], foreground=C["entry_fg"], bordercolor=C["border"], insertcolor=C["entry_fg"])
+    style.configure(
+        "TEntry",
+        fieldbackground=C["input_bg"],
+        foreground=C["text_primary"],
+        bordercolor=C["input_border"],
+        insertcolor=C["text_primary"],
+        padding=(8, 6),
+        relief="flat",
+    )
     style.configure(
         "TCombobox",
-        fieldbackground=C["entry_bg"],
-        foreground=C["entry_fg"],
-        bordercolor=C["border"],
-        selectbackground=C["entry_bg"],
-        selectforeground=C["entry_fg"],
+        fieldbackground=C["input_bg"],
+        foreground=C["text_primary"],
+        bordercolor=C["input_border"],
+        selectbackground=C["input_bg"],
+        selectforeground=C["text_primary"],
+        padding=(7, 5),
     )
     style.map("TEntry",
-              fieldbackground=[("disabled", C["panel"]), ("readonly", C["entry_bg"])],
-              foreground=[("disabled", C["muted"])])
+              fieldbackground=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"])],
+              foreground=[("disabled", C["text_secondary"])])
     style.map("TCombobox",
-              fieldbackground=[("disabled", C["panel"]), ("readonly", C["entry_bg"]), ("active", C["entry_bg"])],
-              background=[("disabled", C["panel"]), ("readonly", C["entry_bg"]), ("active", C["entry_bg"])],
-              foreground=[("disabled", C["muted"]), ("readonly", C["entry_fg"]), ("active", C["entry_fg"])])
+              fieldbackground=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"]), ("active", C["input_bg"])],
+              background=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"]), ("active", C["input_bg"])],
+              foreground=[("disabled", C["text_secondary"]), ("readonly", C["text_primary"]), ("active", C["text_primary"])])
 
     # Toggle controls. Explicit active/selected maps prevent native ttk from
     # painting radio/check labels with a bright platform highlight.
     for toggle_style in ("TCheckbutton", "TRadiobutton"):
         style.configure(
             toggle_style,
-            background=C["panel"],
-            foreground=C["fg"],
-            indicatorbackground=C["entry_bg"],
-            indicatorforeground=C["fg"],
-            focuscolor=C["panel"],
-            bordercolor=C["border"],
+            background=C["card_bg"],
+            foreground=C["text_primary"],
+            indicatorbackground=C["input_bg"],
+            indicatorforeground=C["text_primary"],
+            focuscolor=C["card_bg"],
+            bordercolor=C["input_border"],
         )
         style.map(
             toggle_style,
             background=[
-                ("disabled", C["panel"]),
-                ("pressed", C["panel"]),
-                ("active", C["panel"]),
-                ("selected", C["panel"]),
+                ("disabled", C["card_bg"]),
+                ("pressed", C["card_bg"]),
+                ("active", C["card_bg"]),
+                ("selected", C["card_bg"]),
             ],
             foreground=[
-                ("disabled", C["muted"]),
-                ("pressed", C["fg"]),
-                ("active", C["fg"]),
-                ("selected", C["fg"]),
+                ("disabled", C["text_secondary"]),
+                ("pressed", C["text_primary"]),
+                ("active", C["text_primary"]),
+                ("selected", C["text_primary"]),
             ],
             indicatorbackground=[
-                ("disabled", C["panel"]),
-                ("selected", C["entry_bg"]),
-                ("active", C["entry_bg"]),
+                ("disabled", C["card_bg_raised"]),
+                ("selected", C["input_bg"]),
+                ("active", C["input_bg"]),
             ],
         )
 
     # Progressbar
-    style.configure("TProgressbar", background=C["progress"], troughcolor=C["panel"], bordercolor=C["border"])
+    style.configure("TProgressbar", background=C["accent"], troughcolor=C["card_bg_raised"], bordercolor=C["card_border"])
+    style.configure(
+        "Vertical.TScrollbar",
+        background=C["scrollbar"],
+        troughcolor=C["card_bg_raised"],
+        bordercolor=C["card_bg_raised"],
+        arrowcolor=C["text_secondary"],
+        relief="flat",
+    )
+    style.map(
+        "Vertical.TScrollbar",
+        background=[("active", C["border_strong"]), ("pressed", C["border_strong"])],
+        arrowcolor=[("active", C["text_primary"])],
+    )
 
     # Treeview
     style.configure("Treeview",
-                    background=C["tree_bg"],
-                    fieldbackground=C["tree_bg"],
-                    foreground=C["fg"],
-                    bordercolor=C["border"])
+                    background=C["table_row_bg"],
+                    fieldbackground=C["table_row_bg"],
+                    foreground=C["text_primary"],
+                    bordercolor=C["card_border"],
+                    rowheight=30,
+                    relief="flat")
     style.map("Treeview",
-              background=[("selected", C["sel_bg"])],
-              foreground=[("selected", C["sel_fg"])])
+              background=[("selected", C["table_selected_bg"])],
+              foreground=[("selected", C["table_selected_fg"])])
     style.configure("Treeview.Heading",
-                    background=C["tree_head_bg"],
-                    foreground=C["tree_head_fg"],
-                    bordercolor=C["border"])
+                    background=C["table_header_bg"],
+                    foreground=C["text_primary"],
+                    bordercolor=C["card_border"],
+                    font=("Segoe UI", 9, "bold"),
+                    padding=(7, 8),
+                    relief="flat")
     style.map("Treeview.Heading",
-              background=[("active", C["tree_head_bg"]), ("pressed", C["tree_head_bg"])],
-              foreground=[("active", C["tree_head_fg"]), ("pressed", C["tree_head_fg"])],
-              bordercolor=[("active", C["border"]), ("pressed", C["border"])],
+              background=[("active", C["table_header_bg"]), ("pressed", C["table_header_bg"])],
+              foreground=[("active", C["text_primary"]), ("pressed", C["text_primary"])],
+              bordercolor=[("active", C["card_border"]), ("pressed", C["card_border"])],
               relief=[("pressed", "flat")])
 
     # Patch Text widgets (manually)
     for child in root.winfo_children():
         _patch_text_colors(child, C, root)
+    if hasattr(root, "_side_scroll_canvas"):
+        root._side_scroll_canvas.configure(bg=C["app_bg"])
+    if hasattr(root, "preview_canvas"):
+        root.preview_canvas.configure(bg=C["canvas_bg"])
 
 def _patch_text_colors(widget, C, root):
     if isinstance(widget, tk.Text):
         widget.configure(
-            bg=C["entry_bg"],
-            fg=C["entry_fg"],
-            insertbackground=C["fg"],
-            selectbackground=C["sel_bg"],
-            selectforeground=C["sel_fg"],
+            bg=C["input_bg"],
+            fg=C["text_primary"],
+            insertbackground=C["text_primary"],
+            selectbackground=C["selection_bg"],
+            selectforeground=C["selection_fg"],
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=C["card_border"],
+            highlightcolor=C["accent"],
         )
     # Patch Canvas background to match theme panel
     if isinstance(widget, tk.Canvas):
-        widget.configure(bg=C.get("preview_bg", C["panel"]))
+        widget.configure(bg=C.get("canvas_bg", C["card_bg"]))
     for ch in widget.winfo_children():
         _patch_text_colors(ch, C, root)
 
@@ -436,13 +506,14 @@ class App(BaseTk):
                 pass
         self._settings = load_settings()
         self.geometry(self._settings.window_geometry or "1060x840")
-        self.minsize(980, 740)
+        self.minsize(760, 520)
 
         self._style = ttk.Style(self)
         self.theme_var = tk.StringVar(value=normalize_theme_name(self._settings.theme))
         self.dark_mode = tk.BooleanVar(value=get_theme(self.theme_var.get()).is_dark)
         apply_theme(self, self._style, self.theme_var.get())
         self.theme_var.trace_add("write", self._on_theme_changed)
+        self._icons = self._load_icons()
 
         # state for aspect ratio sync
         self._src_w_mm = None
@@ -453,7 +524,59 @@ class App(BaseTk):
         self._file_groups = {}
         self._active_iid = None
         self._loading_profile = False
+        self._export_events = queue.Queue()
+        self._export_thread = None
+        self._export_cancel_event = threading.Event()
+        self._export_running = False
+        self._close_after_export = False
+        self._settings_enabled = False
+        self._pending_import_paths = set()
+        self._preview_request = None
+        self._recovery_save_after_id = None
+        self._recovery_path = default_recovery_job_path()
         self._build_modern_ui()
+        self.after(50, self._poll_export_events)
+        self.after(400, self._offer_session_recovery)
+
+    def _load_icons(self) -> dict[str, tk.PhotoImage]:
+        icons: dict[str, tk.PhotoImage] = {}
+        names = [
+            "add_files",
+            "trash",
+            "clear",
+            "check_all",
+            "uncheck",
+            "check_selected",
+            "zoom_in",
+            "zoom_out",
+            "fit",
+            "add_panel",
+            "export",
+            "folder",
+            "browse_folder",
+            "settings",
+            "queue",
+            "preview",
+            "warning",
+        ]
+        for name in names:
+            path = resource_path(f"assets/icons/icon_{name}.png")
+            if path.exists():
+                try:
+                    icons[name] = tk.PhotoImage(file=str(path))
+                except Exception:
+                    pass
+        return icons
+
+    def _icon(self, name: str):
+        return getattr(self, "_icons", {}).get(name)
+
+    def _button(self, parent, text: str, command, icon: str | None = None, style: str = "TButton", **kwargs):
+        image = self._icon(icon) if icon else None
+        if image is not None:
+            kwargs.setdefault("compound", "left")
+            kwargs.setdefault("image", image)
+        return ttk.Button(parent, text=text, command=command, style=style, **kwargs)
 
     # ---------- Settings persistence ----------
     def _selected_or_recent_file_path(self) -> str:
@@ -472,6 +595,12 @@ class App(BaseTk):
 
     def _collect_settings(self) -> AppSettings:
         self._save_selected_profile_settings()
+        recent_files = list(dict.fromkeys(
+            [profile.file_path for profile in self._profiles.values()] + (self._settings.recent_files or [])
+        ))[:10]
+        recent_output_dirs = list(dict.fromkeys(
+            [self.outdir_var.get()] + (self._settings.recent_output_dirs or [])
+        ))[:10]
         return AppSettings(
             last_input_path=self._selected_or_recent_file_path(),
             last_output_dir=self.outdir_var.get(),
@@ -479,10 +608,16 @@ class App(BaseTk):
             overlap_mm=self.overlap_var.get(),
             overlap_mode=self.overlap_mode_var.get(),
             dpi=self.dpi_var.get(),
+            color_mode=self.color_mode_var.get(),
             export_format=self.format_var.get(),
             export_mode=self.export_mode_var.get(),
-            recent_files=self._settings.recent_files or [],
-            recent_output_dirs=self._settings.recent_output_dirs or [],
+            icc_mode=self.icc_mode_var.get(),
+            icc_profile_path=self.icc_profile_var.get(),
+            rendering_intent=self.rendering_intent_var.get(),
+            recent_files=recent_files,
+            recent_output_dirs=recent_output_dirs,
+            presets=self._settings.presets or {},
+            layout_templates=self._settings.layout_templates or {},
             theme=self.theme_var.get(),
             window_geometry=self.geometry(),
         )
@@ -495,47 +630,153 @@ class App(BaseTk):
             if hasattr(self, "log"):
                 self.log_print(f"[WARN] Could not save settings: {e}")
 
+    def _schedule_recovery_save(self):
+        if not hasattr(self, "_recovery_path"):
+            return
+        if self._recovery_save_after_id is not None:
+            try:
+                self.after_cancel(self._recovery_save_after_id)
+            except Exception:
+                pass
+        self._recovery_save_after_id = self.after(500, self._write_recovery_session)
+
+    def _write_recovery_session(self):
+        self._recovery_save_after_id = None
+        profiles = list(self._profiles.values())
+        try:
+            if profiles:
+                save_job(self._recovery_path, profiles)
+            else:
+                self._recovery_path.unlink(missing_ok=True)
+        except Exception as exc:
+            if hasattr(self, "log"):
+                self.log_print(f"[WARN] Could not save session recovery: {exc}")
+
+    def _offer_session_recovery(self):
+        if self._profiles or not self._recovery_path.exists():
+            return
+        try:
+            profiles = load_job(self._recovery_path)
+        except Exception:
+            self._recovery_path.unlink(missing_ok=True)
+            return
+        if not messagebox.askyesno(
+            "Recover previous session?",
+            f"Artboard Cutter found {len(profiles)} queue item(s) from an interrupted session. Restore them?",
+        ):
+            self._recovery_path.unlink(missing_ok=True)
+            return
+        grouped = {}
+        for profile in profiles:
+            if profile.output_status == "Processing":
+                profile.output_status = "Interrupted"
+            grouped.setdefault(profile.file_path, []).append(profile)
+        defaults = {
+            "bleed_mm": "0", "overlap_mm": "0", "overlap_mode": "Shared", "dpi": "150",
+            "color_mode": "RGB", "export_format": "PDF", "export_mode": "Raster",
+            "icc_mode": "Off", "icc_profile_path": "", "rendering_intent": "Perceptual",
+        }
+        for source_path, source_profiles in grouped.items():
+            self._insert_imported_profiles(source_path, source_profiles, None, defaults)
+        self.status_var.set("Recovered the previous queue. Use Retry Failed / Resume for interrupted jobs.")
+
     def _on_close(self):
+        if self._export_running:
+            if messagebox.askyesno(
+                "Export in progress",
+                "Cancel the active export and close after the current panel stops?",
+            ):
+                self._close_after_export = True
+                self.on_cancel_export()
+            return
         self._save_settings()
+        try:
+            self._recovery_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.destroy()
 
     def _build_modern_ui(self):
-        topbar = ttk.Frame(self)
-        topbar.pack(fill="x", padx=14, pady=(12, 8))
+        self.rowconfigure(0, weight=0)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        title_col = ttk.Frame(topbar)
+        topbar = ttk.Frame(self, style="Root.TFrame")
+        topbar.grid(row=0, column=0, sticky="ew", padx=18, pady=(12, 10))
+
+        title_col = ttk.Frame(topbar, style="Root.TFrame")
         title_col.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_col, text="Artboard Cutter", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(title_col, text=f"Artboard Cutter  v{APP_VERSION}", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             title_col,
-            text="Split production artwork into raster or vector-stretched panel exports.",
-            style="Muted.TLabel",
+            text="Split production artwork into raster or PDF-preserved panel exports.",
+            style="RootMuted.TLabel",
         ).pack(anchor="w")
-        theme_box = ttk.Combobox(topbar, textvariable=self.theme_var, values=THEME_NAMES, state="readonly", width=22, takefocus=False)
-        theme_box.pack(side="right")
-        self._bind_combobox_clear_selection(theme_box)
-        ttk.Label(topbar, text="Theme", style="Muted.TLabel").pack(side="right", padx=(0, 8))
+        self.theme_combo = ttk.Combobox(topbar, textvariable=self.theme_var, values=THEME_NAMES, state="readonly", width=22, takefocus=False)
+        self.theme_combo.pack(side="right")
+        self._button(topbar, "About", self.on_about, style="Tool.TButton").pack(side="right", padx=(0, 10))
+        self._bind_combobox_clear_selection(self.theme_combo)
+        ttk.Label(topbar, text="Theme", style="RootMuted.TLabel").pack(side="right", padx=(0, 8))
 
         main = ttk.Panedwindow(self, orient="horizontal")
-        main.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        main.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 14))
 
-        preview_group = ttk.LabelFrame(main, text="Live Preview")
-        side = ttk.Frame(main)
+        def make_card(parent, title: str, icon: str | None = None):
+            outer = ttk.Frame(parent, style="Card.TFrame")
+            header = ttk.Frame(outer, style="CardBody.TFrame")
+            header.pack(fill="x", padx=14, pady=(12, 8))
+            label_kwargs = {"text": title, "style": "Section.TLabel"}
+            image = self._icon(icon) if icon else None
+            if image is not None:
+                label_kwargs.update({"image": image, "compound": "left"})
+            ttk.Label(header, **label_kwargs).pack(side="left")
+            body = ttk.Frame(outer, style="CardBody.TFrame")
+            body.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+            return outer, header, body
+
+        preview_group, preview_card_header, preview_body = make_card(main, "Live Preview", "preview")
+        side_outer = ttk.Frame(main, style="Root.TFrame")
+        side_outer.rowconfigure(0, weight=1)
+        side_outer.columnconfigure(0, weight=1)
+        self._side_scroll_canvas = tk.Canvas(side_outer, highlightthickness=0, borderwidth=0)
+        self._side_scroll_y = ttk.Scrollbar(side_outer, orient="vertical", command=self._side_scroll_canvas.yview)
+        self._side_scroll_canvas.configure(yscrollcommand=self._side_scroll_y.set)
+        self._side_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        self._side_scroll_y.grid(row=0, column=1, sticky="ns")
+        side = ttk.Frame(self._side_scroll_canvas, style="Root.TFrame")
+        self._side_scroll_content = side
+        self._side_scroll_window = self._side_scroll_canvas.create_window((0, 0), window=side, anchor="nw")
+        side.bind("<Configure>", self._on_side_scroll_content_configure)
+        self._side_scroll_canvas.bind("<Configure>", self._on_side_scroll_canvas_configure)
+        self._side_scroll_canvas.bind("<MouseWheel>", self._on_side_mousewheel)
+        side.bind("<MouseWheel>", self._on_side_mousewheel)
+        self._side_scroll_canvas.bind("<Button-4>", self._on_side_mousewheel)
+        self._side_scroll_canvas.bind("<Button-5>", self._on_side_mousewheel)
+        side.bind("<Button-4>", self._on_side_mousewheel)
+        side.bind("<Button-5>", self._on_side_mousewheel)
+        self.bind_all("<MouseWheel>", self._on_side_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_side_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_side_mousewheel, add="+")
         main.add(preview_group, weight=4)
-        main.add(side, weight=2)
+        main.add(side_outer, weight=2)
 
         self.preview_var = tk.StringVar(value="Target: -")
-        preview_header = ttk.Frame(preview_group)
-        preview_header.pack(fill="x", padx=8, pady=(8, 4))
-        ttk.Label(preview_header, textvariable=self.preview_var).pack(side="left", fill="x", expand=True)
-        self.add_panel_button = ttk.Button(preview_header, text="Add Panel", width=10, command=self.on_add_panel)
-        self.add_panel_button.pack(side="right", padx=(4, 0))
-        ttk.Button(preview_header, text="Fit", width=6, command=self._preview_fit).pack(side="right", padx=(4, 0))
-        ttk.Button(preview_header, text="+", width=3, command=lambda: self._preview_zoom_by(1.2)).pack(side="right", padx=(4, 0))
-        ttk.Button(preview_header, text="-", width=3, command=lambda: self._preview_zoom_by(1 / 1.2)).pack(side="right")
+        ttk.Label(preview_card_header, text="  Live", style="ToolbarMuted.TLabel").pack(side="left", padx=(8, 12))
+        ttk.Label(preview_card_header, textvariable=self.preview_var, style="ToolbarMuted.TLabel").pack(side="left", fill="x", expand=True)
+        self.add_panel_button = self._button(preview_card_header, "Add Panel", self.on_add_panel, icon="add_panel", style="Accent.TButton", width=11)
+        self.add_panel_button.pack(side="right", padx=(8, 0))
+        self.panel_count_var = tk.StringVar(value="1")
+        self.set_panel_count_button = self._button(preview_card_header, "Set", self.on_set_panel_count, style="Tool.TButton", width=4)
+        self.set_panel_count_button.pack(side="right", padx=(4, 0))
+        self.panel_count_spin = ttk.Spinbox(preview_card_header, from_=1, to=999, textvariable=self.panel_count_var, width=4)
+        self.panel_count_spin.pack(side="right", padx=(8, 0))
+        ttk.Label(preview_card_header, text="Panels", style="ToolbarMuted.TLabel").pack(side="right", padx=(8, 0))
+        self._button(preview_card_header, "Fit", self._preview_fit, icon="fit", style="Tool.TButton", width=6).pack(side="right", padx=(4, 0))
+        self._button(preview_card_header, "", lambda: self._preview_zoom_by(1.2), icon="zoom_in", style="Tool.TButton", width=3).pack(side="right", padx=(4, 0))
+        self._button(preview_card_header, "", lambda: self._preview_zoom_by(1 / 1.2), icon="zoom_out", style="Tool.TButton", width=3).pack(side="right")
 
-        self.preview_canvas = tk.Canvas(preview_group, highlightthickness=0, width=720, height=560)
-        self.preview_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.preview_canvas = tk.Canvas(preview_body, highlightthickness=0, width=720, height=560)
+        self.preview_canvas.pack(fill="both", expand=True)
         self.preview_canvas.bind("<Configure>", lambda e: self._update_preview())
         self.preview_canvas.bind("<ButtonPress-1>", self._preview_left_press)
         self.preview_canvas.bind("<B1-Motion>", self._preview_left_drag)
@@ -555,8 +796,8 @@ class App(BaseTk):
         self._preview_view = None
         self._preview_edge_targets = []
 
-        files_frame = ttk.LabelFrame(side, text="Artwork Queue")
-        files_frame.pack(fill="both", expand=True, pady=(0, 8))
+        files_card, _queue_header, files_frame = make_card(side, "Artwork Queue", "queue")
+        files_card.pack(fill="both", expand=True, pady=(0, 10))
         queue_columns = ("select", "original_size", "current_size", "status", "actions", "path")
         self.files_tree = ttk.Treeview(files_frame, columns=queue_columns, show="tree headings", selectmode="extended", height=10)
         headings = {
@@ -588,55 +829,65 @@ class App(BaseTk):
         sb = ttk.Scrollbar(files_frame, orient="vertical", command=self.files_tree.yview)
         self.files_tree.configure(yscrollcommand=sb.set)
         sb.grid(row=0, column=1, sticky="ns")
+        self.queue_empty_label = ttk.Label(
+            files_frame,
+            text="No artwork files added yet\nAdd files to get started.",
+            style="Empty.TLabel",
+            anchor="center",
+            justify="center",
+            image=self._icon("queue"),
+            compound="top",
+        )
+        self.queue_empty_label.place(relx=0.5, rely=0.42, anchor="center")
 
-        btns = ttk.Frame(files_frame)
-        btns.grid(row=1, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 4))
-        ttk.Button(btns, text="Add Files...", command=self.on_add_files).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=2)
-        ttk.Button(btns, text="Remove", command=self.on_remove_selected).grid(row=0, column=1, sticky="ew", padx=4, pady=2)
-        ttk.Button(btns, text="Clear", command=self.on_clear).grid(row=0, column=2, sticky="ew", padx=(4, 0), pady=2)
-        ttk.Button(btns, text="Check All", command=self.on_check_all).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=2)
-        ttk.Button(btns, text="Uncheck All", command=self.on_uncheck_all).grid(row=1, column=1, sticky="ew", padx=4, pady=2)
-        ttk.Button(btns, text="Check Selected", command=self.on_check_selected).grid(row=1, column=2, sticky="ew", padx=(4, 0), pady=2)
+        btns = ttk.Frame(files_frame, style="CardBody.TFrame")
+        btns.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self._button(btns, "Add Files...", self.on_add_files, icon="add_files").grid(row=0, column=0, sticky="ew", padx=(0, 5), pady=3)
+        self._button(btns, "Remove", self.on_remove_selected, icon="trash", style="Danger.TButton").grid(row=0, column=1, sticky="ew", padx=5, pady=3)
+        self._button(btns, "Clear", self.on_clear, icon="clear").grid(row=0, column=2, sticky="ew", padx=(5, 0), pady=3)
+        self._button(btns, "Check All", self.on_check_all, icon="check_all").grid(row=1, column=0, sticky="ew", padx=(0, 5), pady=3)
+        self._button(btns, "Uncheck All", self.on_uncheck_all, icon="uncheck").grid(row=1, column=1, sticky="ew", padx=5, pady=3)
+        self._button(btns, "Check Selected", self.on_check_selected, icon="check_selected").grid(row=1, column=2, sticky="ew", padx=(5, 0), pady=3)
+        self._button(btns, "Save Job...", self.on_save_job).grid(row=2, column=0, sticky="ew", padx=(0, 5), pady=3)
+        self._button(btns, "Load Job...", self.on_load_job).grid(row=2, column=1, sticky="ew", padx=5, pady=3)
         for c in range(3):
             btns.columnconfigure(c, weight=1)
 
         self.files_tree.bind("<Button-1>", self.on_tree_click)
         self.files_tree.bind("<Double-1>", self.on_tree_double_click)
         self.files_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-        if DND_AVAILABLE:
-            self.files_tree.drop_target_register(DND_FILES)
-            self.files_tree.dnd_bind("<<Drop>>", self.on_drop)
+        self._register_file_drop_targets(files_frame, self.files_tree, self.queue_empty_label)
 
-        params = ttk.LabelFrame(side, text="Export Settings")
-        params.pack(fill="x", pady=(0, 8))
+        params_card, _settings_header, params = make_card(side, "Export Settings", "settings")
+        params_card.pack(fill="x", pady=(0, 10))
         self._settings_widgets = []
 
         def make_param_row(label_text, top_pad=False, bottom_pad=False):
-            row = ttk.Frame(params)
-            row.pack(fill="x", padx=8, pady=((8 if top_pad else 4), (8 if bottom_pad else 4)))
-            ttk.Label(row, text=label_text, width=17, anchor="w").pack(side="left", padx=(0, 8))
+            row = ttk.Frame(params, style="CardBody.TFrame")
+            row.pack(fill="x", pady=((10 if top_pad else 5), (10 if bottom_pad else 5)))
+            ttk.Label(row, text=label_text, width=17, anchor="w", style="Field.TLabel").pack(side="left", padx=(0, 8))
             return row
 
-        mode_row = ttk.Frame(params)
-        mode_row.pack(fill="x", padx=8, pady=(8, 4))
+        mode_row = ttk.Frame(params, style="CardBody.TFrame")
+        mode_row.pack(fill="x", pady=(2, 8))
         mode_row.columnconfigure(1, weight=1)
         mode_row.columnconfigure(3, weight=1)
 
-        saved_mode = self._settings.export_mode if self._settings.export_mode in ("Raster", "Vector") else "Raster"
+        saved_mode = normalize_export_mode(self._settings.export_mode)
         self.export_mode_var = tk.StringVar(value=saved_mode)
-        ttk.Label(mode_row, text="Export Mode", width=12, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        export_mode_choices = ttk.Frame(mode_row)
+        ttk.Label(mode_row, text="Export Mode", width=12, anchor="w", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        export_mode_choices = ttk.Frame(mode_row, style="CardBody.TFrame")
         export_mode_choices.grid(row=0, column=1, sticky="w")
         self.export_mode_raster = ttk.Radiobutton(export_mode_choices, text="Raster", variable=self.export_mode_var, value="Raster")
-        self.export_mode_vector = ttk.Radiobutton(export_mode_choices, text="Vector", variable=self.export_mode_var, value="Vector")
+        self.export_mode_vector = ttk.Radiobutton(export_mode_choices, text="PDF Preserve", variable=self.export_mode_var, value=PDF_PRESERVE_EXPORT_MODE)
         self.export_mode_raster.pack(side="left", padx=(0, 10))
         self.export_mode_vector.pack(side="left")
         self._settings_widgets.extend([self.export_mode_raster, self.export_mode_vector])
 
         saved_overlap_mode = normalize_overlap_mode(getattr(self._settings, "overlap_mode", "Shared"))
         self.overlap_mode_var = tk.StringVar(value=saved_overlap_mode)
-        ttk.Label(mode_row, text="Overlap Mode", width=13, anchor="w").grid(row=0, column=2, sticky="w", padx=(18, 8))
-        overlap_mode_choices = ttk.Frame(mode_row)
+        ttk.Label(mode_row, text="Overlap Mode", width=13, anchor="w", style="Field.TLabel").grid(row=0, column=2, sticky="w", padx=(18, 8))
+        overlap_mode_choices = ttk.Frame(mode_row, style="CardBody.TFrame")
         overlap_mode_choices.grid(row=0, column=3, sticky="w")
         self.overlap_mode_shared = ttk.Radiobutton(overlap_mode_choices, text="Shared", variable=self.overlap_mode_var, value="Shared")
         self.overlap_mode_left = ttk.Radiobutton(overlap_mode_choices, text="Left", variable=self.overlap_mode_var, value="Left")
@@ -644,8 +895,28 @@ class App(BaseTk):
         self.overlap_mode_left.pack(side="left")
         self._settings_widgets.extend([self.overlap_mode_shared, self.overlap_mode_left])
 
-        self.preserve_vectors_var = tk.BooleanVar(value=(saved_mode == "Vector"))
+        self.preserve_vectors_var = tk.BooleanVar(value=core_is_pdf_preserve_mode(saved_mode))
         self.fit_mode_var = tk.StringVar(value="stretch")
+
+        preset_row = make_param_row("Preset")
+        self.preset_var = tk.StringVar(value="")
+        self.preset_combo = ttk.Combobox(
+            preset_row,
+            textvariable=self.preset_var,
+            values=sorted((self._settings.presets or {}).keys(), key=str.casefold),
+            state="readonly",
+            width=16,
+        )
+        self.preset_combo.pack(side="left", fill="x", expand=True)
+        self.apply_preset_button = self._button(preset_row, "Apply", self.on_apply_preset)
+        self.apply_preset_button.pack(side="left", padx=(6, 0))
+        self.save_preset_button = self._button(preset_row, "Save", self.on_save_preset)
+        self.save_preset_button.pack(side="left", padx=(6, 0))
+        self.delete_preset_button = self._button(preset_row, "Delete", self.on_delete_preset, style="Danger.TButton")
+        self.delete_preset_button.pack(side="left", padx=(6, 0))
+        self._settings_widgets.extend(
+            [self.preset_combo, self.apply_preset_button, self.save_preset_button, self.delete_preset_button]
+        )
 
         row = make_param_row("Bleed (mm)", top_pad=True)
         self.bleed_var = tk.StringVar(value=self._settings.bleed_mm)
@@ -665,11 +936,25 @@ class App(BaseTk):
         self.widths_entry.pack(side="left", fill="x", expand=True)
         self._settings_widgets.append(self.widths_entry)
 
+        row = make_param_row("Layout Template")
+        self.layout_template_var = tk.StringVar(value="")
+        self.layout_template_combo = ttk.Combobox(
+            row,
+            textvariable=self.layout_template_var,
+            values=sorted((self._settings.layout_templates or {}).keys(), key=str.casefold),
+            state="readonly",
+            width=14,
+        )
+        self.layout_template_combo.pack(side="left", fill="x", expand=True)
+        self._button(row, "Apply", self.on_apply_layout_template).pack(side="left", padx=(6, 0))
+        self._button(row, "Save", self.on_save_layout_template).pack(side="left", padx=(6, 0))
+        self._button(row, "Delete", self.on_delete_layout_template, style="Danger.TButton").pack(side="left", padx=(6, 0))
+
         row = make_param_row("Height (mm)")
         self.height_var = tk.StringVar(value="")
         self.height_entry = ttk.Entry(row, textvariable=self.height_var, width=12)
         self.height_entry.pack(side="left", fill="x", expand=True)
-        self.reset_size_button = ttk.Button(row, text="Reset Size", command=self.on_reset_size)
+        self.reset_size_button = self._button(row, "Reset Size", self.on_reset_size)
         self.reset_size_button.pack(side="left", padx=(6, 0))
         self._settings_widgets.extend([self.height_entry, self.reset_size_button])
 
@@ -679,6 +964,40 @@ class App(BaseTk):
         self.dpi_entry.pack(side="left", fill="x", expand=True)
         self._settings_widgets.append(self.dpi_entry)
 
+        row = make_param_row("Color Mode")
+        saved_color_mode = "CMYK" if self._settings.color_mode.upper() == "CMYK" else "RGB"
+        self.color_mode_var = tk.StringVar(value=saved_color_mode)
+        self.color_mode_combo = ttk.Combobox(
+            row,
+            textvariable=self.color_mode_var,
+            values=["RGB", "CMYK"],
+            state="readonly",
+            width=10,
+        )
+        self.color_mode_combo.pack(side="left", fill="x", expand=True)
+        self._settings_widgets.append(self.color_mode_combo)
+
+        row = make_param_row("ICC Handling")
+        self.icc_mode_var = tk.StringVar(value=getattr(self._settings, "icc_mode", "Off"))
+        self.icc_mode_combo = ttk.Combobox(row, textvariable=self.icc_mode_var, values=ICC_MODES, state="readonly", width=14)
+        self.icc_mode_combo.pack(side="left", fill="x", expand=True)
+        self._settings_widgets.append(self.icc_mode_combo)
+
+        row = make_param_row("Output ICC Profile")
+        self.icc_profile_var = tk.StringVar(value=getattr(self._settings, "icc_profile_path", ""))
+        self.icc_profile_entry = ttk.Entry(row, textvariable=self.icc_profile_var)
+        self.icc_profile_entry.pack(side="left", fill="x", expand=True)
+        self._button(row, "Browse...", self.on_browse_icc_profile).pack(side="left", padx=(6, 0))
+        self._settings_widgets.append(self.icc_profile_entry)
+
+        row = make_param_row("Rendering Intent")
+        self.rendering_intent_var = tk.StringVar(value=getattr(self._settings, "rendering_intent", "Perceptual"))
+        self.rendering_intent_combo = ttk.Combobox(
+            row, textvariable=self.rendering_intent_var, values=RENDERING_INTENTS, state="readonly", width=20
+        )
+        self.rendering_intent_combo.pack(side="left", fill="x", expand=True)
+        self._settings_widgets.append(self.rendering_intent_combo)
+
         row = make_param_row("Export Format")
         saved_format = self._settings.export_format if self._settings.export_format in ("PDF", "JPG", "TIFF") else "PDF"
         self.format_var = tk.StringVar(value=saved_format)
@@ -687,21 +1006,27 @@ class App(BaseTk):
         self._settings_widgets.append(self.format_combo)
 
         row = make_param_row("Output Folder", bottom_pad=True)
-        self.outdir_var = tk.StringVar(value=self._settings.last_output_dir or str(Path.cwd() / "output"))
+        self.outdir_var = tk.StringVar(value=self._settings.last_output_dir or str(default_output_dir()))
         ttk.Entry(row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse...", command=self.on_browse_outdir).pack(side="left", padx=(6, 0))
+        self._button(row, "Browse...", self.on_browse_outdir, icon="browse_folder").pack(side="left", padx=(6, 0))
 
-        status_frame = ttk.LabelFrame(side, text="Run")
-        status_frame.pack(fill="x", pady=(0, 8))
+        run_card, _run_header, status_frame = make_card(side, "Run", "export")
+        run_card.pack(fill="x", pady=(0, 10))
         self.status_var = tk.StringVar(value="Add files, check items to process, then start export.")
-        ttk.Label(status_frame, textvariable=self.status_var, style="Muted.TLabel", wraplength=360).pack(fill="x", padx=8, pady=(8, 6))
+        ttk.Label(status_frame, textvariable=self.status_var, style="Muted.TLabel", wraplength=360).pack(fill="x", pady=(0, 8))
         self.progress = ttk.Progressbar(status_frame, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(status_frame, text="Start Export", command=self.on_start, style="Accent.TButton").pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(status_frame, text="Open Logs Folder", command=self.on_open_logs_folder).pack(fill="x", padx=8, pady=(0, 8))
+        self.progress.pack(fill="x", pady=(0, 10))
+        self.start_export_button = self._button(status_frame, "Start Export", self.on_start, icon="export", style="Accent.TButton")
+        self.start_export_button.pack(fill="x", pady=(0, 8))
+        self.retry_failed_button = self._button(status_frame, "Retry Failed / Resume", self.on_retry_failed)
+        self.retry_failed_button.pack(fill="x", pady=(0, 8))
+        self.cancel_export_button = self._button(status_frame, "Cancel Export", self.on_cancel_export, style="Danger.TButton")
+        self.cancel_export_button.pack(fill="x", pady=(0, 8))
+        self.cancel_export_button.configure(state="disabled")
+        self._button(status_frame, "Open Logs Folder", self.on_open_logs_folder, icon="folder").pack(fill="x")
 
-        log_frame = ttk.LabelFrame(self, text="Activity Log")
-        log_frame.pack(fill="both", expand=False, padx=14, pady=(0, 12))
+        log_card, _log_header, log_frame = make_card(side, "Activity Log", None)
+        log_card.pack(fill="both", expand=False, pady=(0, 8))
         self.log = tk.Text(log_frame, height=9, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True)
 
@@ -720,10 +1045,66 @@ class App(BaseTk):
         self.overlap_var.trace_add("write", self._on_profile_setting_changed)
         self.overlap_mode_var.trace_add("write", self._on_profile_setting_changed)
         self.dpi_var.trace_add("write", self._on_profile_setting_changed)
+        self.color_mode_var.trace_add("write", self._on_profile_setting_changed)
+        self.icc_mode_var.trace_add("write", self._on_profile_setting_changed)
+        self.icc_profile_var.trace_add("write", self._on_profile_setting_changed)
+        self.rendering_intent_var.trace_add("write", self._on_profile_setting_changed)
         self.export_mode_var.trace_add("write", self._on_export_mode_changed)
         self.format_var.trace_add("write", self._on_profile_setting_changed)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._set_settings_enabled(False)
+        self._render_preview_empty("No artwork loaded", "Add files to the queue to see preview.")
+
+    def _on_side_scroll_content_configure(self, _event=None):
+        if not hasattr(self, "_side_scroll_canvas"):
+            return
+        self._side_scroll_canvas.configure(scrollregion=self._side_scroll_canvas.bbox("all"))
+        self._on_side_scroll_canvas_configure()
+
+    def _on_side_scroll_canvas_configure(self, _event=None):
+        if not hasattr(self, "_side_scroll_canvas") or not hasattr(self, "_side_scroll_content"):
+            return
+        needs_scroll = self._side_scroll_content.winfo_reqheight() > max(1, self._side_scroll_canvas.winfo_height())
+        if needs_scroll:
+            self._side_scroll_y.grid()
+        else:
+            self._side_scroll_y.grid_remove()
+            self._side_scroll_canvas.yview_moveto(0)
+        canvas_width = max(1, self._side_scroll_canvas.winfo_width())
+        self._side_scroll_canvas.itemconfigure(self._side_scroll_window, width=canvas_width)
+        self._side_scroll_canvas.configure(scrollregion=self._side_scroll_canvas.bbox("all"))
+
+    def _widget_contains(self, parent, child) -> bool:
+        try:
+            widget = child
+            while widget is not None:
+                if widget == parent:
+                    return True
+                widget = widget.master
+        except Exception:
+            pass
+        return False
+
+    def _should_skip_side_scroll(self, widget) -> bool:
+        for attr in ("preview_canvas", "files_tree", "log", "format_combo", "theme_combo"):
+            target = getattr(self, attr, None)
+            if target is not None and self._widget_contains(target, widget):
+                return True
+        return False
+
+    def _on_side_mousewheel(self, event):
+        if not hasattr(self, "_side_scroll_canvas") or self._should_skip_side_scroll(getattr(event, "widget", None)):
+            return None
+        if not self._widget_contains(self._side_scroll_content, getattr(event, "widget", None)):
+            return None
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if event.delta > 0 else 1
+        self._side_scroll_canvas.yview_scroll(delta, "units")
+        return "break"
 
     def _create_checkbox_images(self):
         colors = getattr(self, "_theme_tokens", get_theme(self.theme_var.get()).colors)
@@ -746,6 +1127,15 @@ class App(BaseTk):
     def _checkbox_text(self, selected: bool) -> str:
         return "☑" if selected else "☐"
 
+    def _update_queue_empty_state(self):
+        if not hasattr(self, "queue_empty_label"):
+            return
+        has_items = bool(self.files_tree.get_children(""))
+        if has_items:
+            self.queue_empty_label.place_forget()
+        else:
+            self.queue_empty_label.place(relx=0.5, rely=0.42, anchor="center")
+
     def _disable_combobox_wheel_changes(self):
         def block_scroll(_event):
             return "break"
@@ -766,7 +1156,7 @@ class App(BaseTk):
         combo.bind("<<ComboboxSelected>>", lambda _event: self.after_idle(clear_selection), add="+")
 
     def on_open_logs_folder(self):
-        log_dir = Path("logs").resolve()
+        log_dir = default_log_dir()
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             if sys.platform.startswith("win"):
@@ -778,6 +1168,14 @@ class App(BaseTk):
             self.status_var.set(f"Opened logs folder: {log_dir}")
         except Exception as exc:
             messagebox.showerror("Could not open logs folder", f"{log_dir}\n\n{exc}")
+
+    def on_about(self):
+        messagebox.showinfo(
+            "About Artboard Cutter",
+            f"Artboard Cutter {APP_VERSION}\n\n"
+            "Production artwork panel export with streamed TIFF, PDF Preserve, ICC color management, "
+            "staged verification, job recovery, and reusable presets/layouts.",
+        )
 
     # ---------- Theme ----------
     def _on_theme_changed(self, *_):
@@ -791,17 +1189,173 @@ class App(BaseTk):
             self._create_checkbox_images()
             for iid in self.files_tree.get_children(""):
                 self._update_profile_row(iid)
+            self._update_queue_empty_state()
         self._update_preview()
 
     def _on_export_mode_changed(self, *_):
-        is_vector = self.export_mode_var.get() == "Vector"
-        self.preserve_vectors_var.set(is_vector)
-        if is_vector and self.format_var.get() != "PDF":
-            self.format_var.set("PDF")
+        if self._syncing:
+            return
+        mode = normalize_export_mode(self.export_mode_var.get())
+        if self.export_mode_var.get() != mode:
+            self.export_mode_var.set(mode)
+            return
+        is_pdf_preserve = core_is_pdf_preserve_mode(mode)
+        self.preserve_vectors_var.set(is_pdf_preserve)
+        profile = self._profiles.get(self._active_iid)
+        if is_pdf_preserve:
+            current_format = self.format_var.get().upper()
+            if current_format in {"JPG", "TIFF"} and profile:
+                profile.raster_export_format = current_format
+            if current_format != "PDF":
+                self.format_var.set("PDF")
+        elif profile and self.format_var.get() == "PDF" and profile.raster_export_format in {"JPG", "TIFF"}:
+            self.format_var.set(profile.raster_export_format)
+        self._sync_format_controls()
         if hasattr(self, "status_var"):
-            self.status_var.set("Vector mode stretches PDF artwork to the requested total size." if is_vector else "Raster mode renders panels at the selected DPI.")
+            self.status_var.set(
+                "PDF Preserve mode clips PDF content or embedded raster images without DPI re-rendering."
+                if is_pdf_preserve
+                else "Raster mode renders panels at the selected DPI."
+            )
         self._save_selected_profile_settings()
         self._update_preview()
+
+    def _refresh_preset_choices(self):
+        if not hasattr(self, "preset_combo"):
+            return
+        names = sorted((self._settings.presets or {}).keys(), key=str.casefold)
+        self.preset_combo.configure(values=names)
+        if self.preset_var.get() not in names:
+            self.preset_var.set("")
+
+    def on_save_preset(self):
+        if not self._active_iid:
+            return
+        name = simpledialog.askstring("Save export preset", "Preset name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        presets = dict(self._settings.presets or {})
+        if name in presets and not messagebox.askyesno("Replace preset?", f"Replace the existing preset '{name}'?"):
+            return
+        presets[name] = {
+            "bleed_mm": self.bleed_var.get(),
+            "overlap_mm": self.overlap_var.get(),
+            "overlap_mode": self.overlap_mode_var.get(),
+            "dpi": self.dpi_var.get(),
+            "color_mode": self.color_mode_var.get(),
+            "export_format": self.format_var.get(),
+            "export_mode": self.export_mode_var.get(),
+            "icc_mode": self.icc_mode_var.get(),
+            "icc_profile_path": self.icc_profile_var.get(),
+            "rendering_intent": self.rendering_intent_var.get(),
+        }
+        self._settings.presets = presets
+        self._refresh_preset_choices()
+        self.preset_var.set(name)
+        self._save_settings()
+        self.status_var.set(f"Saved export preset: {name}. Artwork size and output folder are not included.")
+
+    def on_apply_preset(self):
+        preset = (self._settings.presets or {}).get(self.preset_var.get())
+        if not preset or not self._active_iid:
+            return
+        self._loading_profile = True
+        self._syncing = True
+        try:
+            self.bleed_var.set(preset.get("bleed_mm", "0"))
+            self.overlap_var.set(preset.get("overlap_mm", "0"))
+            self.overlap_mode_var.set(normalize_overlap_mode(preset.get("overlap_mode", "Shared")))
+            self.dpi_var.set(preset.get("dpi", "150"))
+            self.color_mode_var.set(preset.get("color_mode", "RGB"))
+            self.format_var.set(preset.get("export_format", "PDF"))
+            self.export_mode_var.set(normalize_export_mode(preset.get("export_mode", "Raster")))
+            self.icc_mode_var.set(preset.get("icc_mode", "Off"))
+            self.icc_profile_var.set(preset.get("icc_profile_path", ""))
+            self.rendering_intent_var.set(preset.get("rendering_intent", "Perceptual"))
+        finally:
+            self._syncing = False
+            self._loading_profile = False
+        self._on_export_mode_changed()
+        self._save_selected_profile_settings()
+        self._update_preview()
+        self.status_var.set(f"Applied export preset: {self.preset_var.get()}. Artwork size is unchanged.")
+
+    def on_delete_preset(self):
+        name = self.preset_var.get()
+        if not name or name not in (self._settings.presets or {}):
+            return
+        if not messagebox.askyesno("Delete preset?", f"Delete the preset '{name}'?"):
+            return
+        presets = dict(self._settings.presets or {})
+        presets.pop(name, None)
+        self._settings.presets = presets
+        self._refresh_preset_choices()
+        self._save_settings()
+        self.status_var.set(f"Deleted preset: {name}")
+
+    def _refresh_layout_template_choices(self):
+        names = sorted((self._settings.layout_templates or {}).keys(), key=str.casefold)
+        self.layout_template_combo.configure(values=names)
+        if self.layout_template_var.get() not in names:
+            self.layout_template_var.set("")
+
+    def on_save_layout_template(self):
+        if not self._active_iid:
+            return
+        try:
+            widths = parse_widths_list(self.widths_var.get())
+            total = sum(widths)
+            if total <= 0:
+                raise ValueError("Panel widths must be positive.")
+        except Exception as exc:
+            messagebox.showerror("Cannot save layout", str(exc))
+            return
+        name = simpledialog.askstring("Save layout template", "Layout name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        templates = dict(self._settings.layout_templates or {})
+        if name in templates and not messagebox.askyesno("Replace layout?", f"Replace the existing layout '{name}'?"):
+            return
+        templates[name] = {"ratios": [width / total for width in widths]}
+        self._settings.layout_templates = templates
+        self._refresh_layout_template_choices()
+        self.layout_template_var.set(name)
+        self._save_settings()
+        self.status_var.set(f"Saved proportional layout: {name}")
+
+    def on_apply_layout_template(self):
+        template = (self._settings.layout_templates or {}).get(self.layout_template_var.get())
+        if not template or not self._active_iid:
+            return
+        try:
+            current_widths = parse_widths_list(self.widths_var.get())
+            total = sum(current_widths)
+            ratios = [float(value) for value in template.get("ratios", [])]
+            ratio_total = sum(ratios)
+            if total <= 0 or ratio_total <= 0:
+                raise ValueError("The layout template is invalid.")
+            widths = [total * ratio / ratio_total for ratio in ratios]
+            widths[-1] = total - sum(widths[:-1])
+        except Exception as exc:
+            messagebox.showerror("Cannot apply layout", str(exc))
+            return
+        self.widths_var.set(" ".join(fmt_mm(width) for width in widths))
+        self.status_var.set(f"Applied layout without changing the overall artwork width: {self.layout_template_var.get()}")
+
+    def on_delete_layout_template(self):
+        name = self.layout_template_var.get()
+        if not name or name not in (self._settings.layout_templates or {}):
+            return
+        if not messagebox.askyesno("Delete layout?", f"Delete the layout '{name}'?"):
+            return
+        templates = dict(self._settings.layout_templates or {})
+        templates.pop(name, None)
+        self._settings.layout_templates = templates
+        self._refresh_layout_template_choices()
+        self._save_settings()
+        self.status_var.set(f"Deleted layout: {name}")
 
     # ---------- Files tree helpers ----------
     def _profile_iids(self):
@@ -822,27 +1376,52 @@ class App(BaseTk):
         return [child for child in self.files_tree.get_children(iid) if child in self._profiles]
 
     def _add_file_item(self, path: str):
-        path = str(Path(path))
+        path = str(Path(path).expanduser().resolve())
         if path in self._file_groups:
             iid = self._file_groups[path]
             self.files_tree.selection_set(iid)
             self.files_tree.focus(iid)
             self.files_tree.see(iid)
             return iid
-        try:
-            profiles = self._create_profiles(Path(path))
-        except Exception as e:
-            self.log_print(f"[WARN] Cannot probe {path}: {e}")
+        if path in self._pending_import_paths:
+            return None
+        self._pending_import_paths.add(path)
+        defaults = {
+            "bleed_mm": self.bleed_var.get(),
+            "overlap_mm": self.overlap_var.get(),
+            "overlap_mode": self.overlap_mode_var.get(),
+            "dpi": self.dpi_var.get(),
+            "color_mode": self.color_mode_var.get(),
+            "export_format": self.format_var.get(),
+            "export_mode": self.export_mode_var.get(),
+            "icc_mode": self.icc_mode_var.get(),
+            "icc_profile_path": self.icc_profile_var.get(),
+            "rendering_intent": self.rendering_intent_var.get(),
+        }
+        self.status_var.set(f"Reading artwork information: {Path(path).name}...")
+
+        def work():
+            try:
+                profiles = core_create_artwork_profiles(Path(path), **defaults)
+                error = None
+            except Exception as exc:
+                profiles = []
+                error = str(exc)
+            self._export_events.put(("import_ready", path, profiles, error, defaults))
+
+        threading.Thread(target=work, daemon=True).start()
+        return None
+
+    def _insert_imported_profiles(self, path: str, profiles: list[ArtworkProfile], error: str | None, defaults: dict):
+        self._pending_import_paths.discard(path)
+        if error:
+            self.log_print(f"[WARN] Cannot probe {path}: {error}")
             profiles = [
                 ArtworkProfile(
                     file_path=path,
                     output_name=Path(path).stem,
-                    bleed_mm=self.bleed_var.get(),
-                    overlap_mm=self.overlap_var.get(),
-                    overlap_mode=self.overlap_mode_var.get(),
-                    dpi=self.dpi_var.get(),
-                    export_format=self.format_var.get(),
-                    export_mode=self.export_mode_var.get(),
+                    **defaults,
+                    raster_export_format=defaults["export_format"],
                     output_status="Probe failed",
                     validation_state="error",
                 )
@@ -871,31 +1450,22 @@ class App(BaseTk):
             self.files_tree.selection_set(first_new)
             self.files_tree.focus(first_new)
             self.files_tree.see(first_new)
-        return last_iid
-
-    def _create_profiles(self, p: Path) -> list[ArtworkProfile]:
-        profiles = core_create_artwork_profiles(
-            p,
-            bleed_mm=self.bleed_var.get(),
-            overlap_mm=self.overlap_var.get(),
-            overlap_mode=self.overlap_mode_var.get(),
-            dpi=self.dpi_var.get(),
-            export_format=self.format_var.get(),
-            export_mode=self.export_mode_var.get(),
-        )
+        self._update_queue_empty_state()
+        self.status_var.set(f"Added {Path(path).name} to the artwork queue.")
         for profile in profiles:
-            if profile.source_page_count > 1:
-                self.log_print(
-                    f"[INFO] Source size {p.name} page {profile.source_page_index + 1}/{profile.source_page_count}: "
-                    f"width={fmt_mm(profile.original_width_mm)} mm, "
-                    f"height={fmt_mm(profile.original_height_mm)} mm"
-                )
-            else:
-                self.log_print(
-                    f"[INFO] Source size {p.name}: width={fmt_mm(profile.original_width_mm)} mm, "
-                    f"height={fmt_mm(profile.original_height_mm)} mm"
-                )
-        return profiles
+            page_label = (
+                f" page {profile.source_page_index + 1}/{profile.source_page_count}"
+                if profile.source_page_count > 1
+                else ""
+            )
+            self.log_print(
+                f"[INFO] Source size {Path(path).name}{page_label}: "
+                f"width={fmt_mm(profile.original_width_mm)} mm, height={fmt_mm(profile.original_height_mm)} mm"
+                if profile.original_width_mm is not None and profile.original_height_mm is not None
+                else f"[WARN] Source dimensions unavailable for {Path(path).name}{page_label}."
+            )
+        self._schedule_recovery_save()
+        return last_iid
 
     def _update_profile_row(self, iid):
         profile = self._profiles.get(iid)
@@ -1049,7 +1619,7 @@ class App(BaseTk):
 
         def work():
             names = get_illustrator_artboard_names(source_path, timeout_seconds=20, require_running=True)
-            self.after(0, lambda: finish(names))
+            self._export_events.put(("call", lambda: finish(names)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1105,6 +1675,7 @@ class App(BaseTk):
         for group in self.files_tree.get_children(""):
             if group not in self._profiles:
                 self._update_group_row(group)
+        self._schedule_recovery_save()
 
     def on_uncheck_all(self):
         for iid in self._profile_iids():
@@ -1115,20 +1686,32 @@ class App(BaseTk):
         for group in self.files_tree.get_children(""):
             if group not in self._profiles:
                 self._update_group_row(group)
+        self._schedule_recovery_save()
     # ---------- Drag & drop / file buttons ----------
+    def _register_file_drop_targets(self, *widgets):
+        """Make every visible layer of the queue accept operating-system file drops."""
+        if not DND_AVAILABLE:
+            return
+        for widget in widgets:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self.on_drop)
+
     def on_drop(self, event):
         raw = self.tk.splitlist(event.data)
-        last = None
         for p in raw:
-            p = p.strip("{}").strip()
+            # splitlist already removes Tcl grouping braces. Stripping braces
+            # again would corrupt valid filenames such as "{proof}.pdf".
+            p = str(p).strip()
             if p.lower().endswith((".pdf", ".ai", ".jpg", ".jpeg", ".png", ".tif", ".tiff")):
-                last = self._add_file_item(p)
-        if last:
-            self.files_tree.selection_set(last)
+                self._add_file_item(p)
+        return getattr(event, "action", None)
 
     def on_add_files(self):
+        last_input = Path(self._settings.last_input_path) if self._settings.last_input_path else None
+        initial_dir = last_input.parent if last_input and last_input.exists() else Path.cwd()
         files = filedialog.askopenfilenames(
             title="Select files",
+            initialdir=str(initial_dir),
             filetypes=[
                 ("Supported files", "*.pdf *.ai *.jpg *.jpeg *.png *.tif *.tiff"),
                 ("PDF files", "*.pdf"),
@@ -1137,17 +1720,20 @@ class App(BaseTk):
                 ("All files", "*.*"),
             ]
         )
-        last = None
         for f in files:
-            last = self._add_file_item(f)
-        if last:
-            self.files_tree.selection_set(last)
+            self._add_file_item(f)
 
     def on_remove_selected(self):
+        if self._export_running:
+            messagebox.showwarning("Export in progress", "Cancel or finish the export before removing queue items.")
+            return
         for iid in list(self.files_tree.selection()):
             self._remove_iid(iid)
 
     def on_clear(self):
+        if self._export_running:
+            messagebox.showwarning("Export in progress", "Cancel or finish the export before clearing the queue.")
+            return
         for iid in list(self.files_tree.get_children("")):
             self._remove_iid(iid, select_next=False)
         self._active_iid = None
@@ -1156,7 +1742,72 @@ class App(BaseTk):
         self._set_settings_enabled(False)
         self._bg_preview_im = None
         self._bg_preview_tk = None
+        self._update_queue_empty_state()
         self._update_preview()
+        self._schedule_recovery_save()
+
+    def on_save_job(self):
+        if self._export_running:
+            messagebox.showwarning("Export in progress", "Finish or cancel the export before saving the job.")
+            return
+        self._save_selected_profile_settings()
+        profiles = list(self._profiles.values())
+        if not profiles:
+            messagebox.showwarning("Empty queue", "Add artwork before saving a job.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save Artboard Cutter job",
+            defaultextension=".artboard-job.json",
+            filetypes=[("Artboard Cutter jobs", "*.artboard-job.json"), ("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            save_job(Path(path), profiles)
+        except Exception as exc:
+            messagebox.showerror("Could not save job", str(exc))
+            return
+        self.status_var.set(f"Saved job: {Path(path).name}")
+
+    def on_load_job(self):
+        if self._export_running:
+            messagebox.showwarning("Export in progress", "Finish or cancel the export before loading a job.")
+            return
+        path = filedialog.askopenfilename(
+            title="Load Artboard Cutter job",
+            filetypes=[("Artboard Cutter jobs", "*.artboard-job.json"), ("JSON files", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            profiles = load_job(Path(path))
+        except Exception as exc:
+            messagebox.showerror("Could not load job", str(exc))
+            return
+        if self._profiles and not messagebox.askyesno("Replace current queue?", "Replace the current artwork queue with this job?"):
+            return
+        self.on_clear()
+        grouped = {}
+        for profile in profiles:
+            if not Path(profile.file_path).exists():
+                profile.output_status = "Source missing"
+                profile.validation_state = "error"
+            grouped.setdefault(profile.file_path, []).append(profile)
+        defaults = {
+            "bleed_mm": "0",
+            "overlap_mm": "0",
+            "overlap_mode": "Shared",
+            "dpi": "150",
+            "color_mode": "RGB",
+            "export_format": "PDF",
+            "export_mode": "Raster",
+            "icc_mode": "Off",
+            "icc_profile_path": "",
+            "rendering_intent": "Perceptual",
+        }
+        for source_path, source_profiles in grouped.items():
+            self._insert_imported_profiles(source_path, source_profiles, None, defaults)
+        self.status_var.set(f"Loaded job: {Path(path).name}")
 
     def _remove_iid(self, iid, select_next=True):
         if iid not in self._profiles:
@@ -1187,6 +1838,7 @@ class App(BaseTk):
         elif profile:
             self._file_groups.pop(profile.file_path, None)
         if not select_next:
+            self._update_queue_empty_state()
             return
         children = self._profile_iids()
         if children:
@@ -1198,6 +1850,7 @@ class App(BaseTk):
             self._bg_preview_im = None
             self._bg_preview_tk = None
             self._update_preview()
+        self._update_queue_empty_state()
 
     def on_browse_outdir(self):
         initial = Path(self.outdir_var.get()).expanduser()
@@ -1207,6 +1860,16 @@ class App(BaseTk):
         if d:
             self.outdir_var.set(d)
             self._save_settings()
+
+    def on_browse_icc_profile(self):
+        initial = Path(self.icc_profile_var.get()).expanduser().parent if self.icc_profile_var.get() else Path.cwd()
+        path = filedialog.askopenfilename(
+            title="Choose output ICC profile",
+            initialdir=str(initial if initial.exists() else Path.cwd()),
+            filetypes=[("ICC profiles", "*.icc *.icm"), ("All files", "*.*")],
+        )
+        if path:
+            self.icc_profile_var.set(path)
 
     # ---------- Log & parsing ----------
     def log_print(self, msg: str):
@@ -1218,6 +1881,7 @@ class App(BaseTk):
 
     # ---------- Artwork profile state ----------
     def _set_settings_enabled(self, enabled: bool):
+        self._settings_enabled = bool(enabled)
         state = "normal" if enabled else "disabled"
         combo_state = "readonly" if enabled else "disabled"
         for widget in getattr(self, "_settings_widgets", []):
@@ -1233,6 +1897,38 @@ class App(BaseTk):
             self.reset_size_button.configure(state=("normal" if can_reset else "disabled"))
         if hasattr(self, "add_panel_button"):
             self.add_panel_button.configure(state=("normal" if enabled else "disabled"))
+        for name in ("panel_count_spin", "set_panel_count_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(state=("normal" if enabled else "disabled"))
+        self._sync_format_controls()
+
+    def _sync_format_controls(self):
+        if not hasattr(self, "format_combo"):
+            return
+        preserve = core_is_pdf_preserve_mode(self.export_mode_var.get())
+        if not self._settings_enabled or self._export_running or preserve:
+            self.format_combo.configure(state="disabled")
+        else:
+            self.format_combo.configure(state="readonly")
+        if hasattr(self, "dpi_entry"):
+            self.dpi_entry.configure(
+                state="disabled" if (not self._settings_enabled or self._export_running or preserve) else "normal"
+            )
+        if hasattr(self, "color_mode_combo"):
+            self.color_mode_combo.configure(
+                state="disabled" if (not self._settings_enabled or self._export_running or preserve) else "readonly"
+            )
+        icc_disabled = not self._settings_enabled or self._export_running or preserve
+        if hasattr(self, "icc_mode_combo"):
+            self.icc_mode_combo.configure(state="disabled" if icc_disabled else "readonly")
+        if hasattr(self, "icc_profile_entry"):
+            self.icc_profile_entry.configure(
+                state="disabled" if icc_disabled or self.icc_mode_var.get() == "Off" else "normal"
+            )
+        if hasattr(self, "rendering_intent_combo"):
+            self.rendering_intent_combo.configure(
+                state="disabled" if icc_disabled or self.icc_mode_var.get() != "Convert" else "readonly"
+            )
 
     def _active_profile_has_original_size(self) -> bool:
         profile = self._profiles.get(self._active_iid)
@@ -1252,10 +1948,18 @@ class App(BaseTk):
             self.widths_var.set(profile.panel_widths)
             self.height_var.set(profile.height_mm)
             self.dpi_var.set(profile.dpi)
+            self.color_mode_var.set(profile.color_mode)
+            self.icc_mode_var.set(profile.icc_mode)
+            self.icc_profile_var.set(profile.icc_profile_path)
+            self.rendering_intent_var.set(profile.rendering_intent)
             self.format_var.set(profile.export_format)
             self.export_mode_var.set(profile.export_mode)
             self.preserve_vectors_var.set(profile.preserve_vectors)
             self.fit_mode_var.set(profile.vector_fit_mode)
+            try:
+                self.panel_count_var.set(str(len(parse_widths_list(profile.panel_widths))))
+            except Exception:
+                self.panel_count_var.set("1")
             self._src_w_mm = profile.original_width_mm
             self._src_h_mm = profile.original_height_mm
             self._src_ar = (self._src_w_mm / self._src_h_mm) if self._src_w_mm and self._src_h_mm else None
@@ -1264,39 +1968,44 @@ class App(BaseTk):
             self._syncing = False
             self._loading_profile = False
         self._set_settings_enabled(True)
+        self._sync_format_controls()
         self._update_preview()
 
     def _load_preview_image(self, p: Path, page_index: int = 0):
-        try:
-            doc = open_pdf_robust(p)
-        except Exception as e:
-            self.log_print(f"[WARN] Cannot load preview {p}: {e}")
-            self._bg_preview_im = None
-            self._bg_preview_tk = None
-            return
-        try:
-            page = doc.load_page(page_index)
-            rect = page.rect
+        request = (self._active_iid, str(p), int(page_index))
+        self._preview_request = request
+        self._bg_preview_im = None
+        self._bg_preview_tk = None
+
+        def work():
+            doc = None
             try:
-                if PIL_AVAILABLE:
-                    max_px = 1600.0
-                    max_dim_pt = max(float(rect.width), float(rect.height)) or 1.0
-                    scale = max(0.2, min(2.0, max_px / max_dim_pt))
-                    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
-                    self._bg_preview_im = pixmap_to_pil(pix)
-                else:
-                    self._bg_preview_im = None
-                self._bg_preview_tk = None
-            except Exception:
-                self._bg_preview_im = None
-                self._bg_preview_tk = None
-        except Exception as e:
-            self.log_print(f"[WARN] Could not render preview: {p} ({e})")
-        finally:
-            try:
-                doc.close()
-            except Exception:
-                pass
+                with PDF_OPERATION_LOCK:
+                    doc = open_pdf_robust(p)
+                    page = doc.load_page(page_index)
+                    rect = page.rect
+                    if PIL_AVAILABLE:
+                        max_px = 1600.0
+                        max_dim_pt = max(float(rect.width), float(rect.height)) or 1.0
+                        scale = max(0.2, min(2.0, max_px / max_dim_pt))
+                        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                        image = pixmap_to_pil(pix)
+                    else:
+                        image = None
+                error = None
+            except Exception as exc:
+                image = None
+                error = str(exc)
+            finally:
+                if doc is not None:
+                    try:
+                        with PDF_OPERATION_LOCK:
+                            doc.close()
+                    except Exception:
+                        pass
+            self._export_events.put(("preview_ready", request, image, error))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _save_selected_profile_settings(self):
         if self._loading_profile:
@@ -1310,10 +2019,17 @@ class App(BaseTk):
         profile.overlap_mm = self.overlap_var.get()
         profile.overlap_mode = normalize_overlap_mode(self.overlap_mode_var.get())
         profile.dpi = self.dpi_var.get()
+        profile.color_mode = self.color_mode_var.get()
+        profile.icc_mode = self.icc_mode_var.get()
+        profile.icc_profile_path = self.icc_profile_var.get()
+        profile.rendering_intent = self.rendering_intent_var.get()
         profile.export_format = self.format_var.get()
         profile.export_mode = self.export_mode_var.get()
+        if not core_is_pdf_preserve_mode(profile.export_mode) and profile.export_format.upper() in {"PDF", "JPG", "TIFF"}:
+            profile.raster_export_format = profile.export_format.upper()
         profile.apply_export_mode_rules()
         self._update_profile_row(self._active_iid)
+        self._schedule_recovery_save()
 
     def on_reset_size(self):
         profile = self._profiles.get(self._active_iid)
@@ -1331,6 +2047,10 @@ class App(BaseTk):
         self._update_preview()
     # ---------- Aspect sync (preserve vectors) ----------
     def _on_widths_changed(self, *_):
+        try:
+            self.panel_count_var.set(str(len(parse_widths_list(self.widths_var.get()))))
+        except Exception:
+            pass
         self._save_selected_profile_settings()
         self._update_preview()
 
@@ -1340,6 +2060,7 @@ class App(BaseTk):
 
     def _on_profile_setting_changed(self, *_):
         self._save_selected_profile_settings()
+        self._sync_format_controls()
         self._update_preview()
 
     def _preview_fit(self):
@@ -1461,11 +2182,25 @@ class App(BaseTk):
             return
         try:
             widths = parse_widths_list(self.widths_var.get())
-            widths = core_split_last_panel_width(widths)
+            widths = core_add_evenly_distributed_panel(widths)
         except Exception as exc:
             messagebox.showerror("Cannot add panel", str(exc))
             return
         self.widths_var.set(" ".join(fmt_mm(width) for width in widths))
+        self._save_selected_profile_settings()
+        self._update_preview()
+
+    def on_set_panel_count(self):
+        if not self._profiles.get(self._active_iid):
+            return
+        try:
+            widths = parse_widths_list(self.widths_var.get())
+            count = int(self.panel_count_var.get())
+            redistributed = core_redistribute_panel_widths(sum(widths), count)
+        except Exception as exc:
+            messagebox.showerror("Cannot set panel count", str(exc))
+            return
+        self.widths_var.set(" ".join(fmt_mm(width) for width in redistributed))
         self._save_selected_profile_settings()
         self._update_preview()
 
@@ -1487,7 +2222,7 @@ class App(BaseTk):
             self.preview_var.set("Target: -")
             # Clear visual preview on parse error
             if hasattr(self, "preview_canvas"):
-                self.preview_canvas.delete("all")
+                self._render_preview_empty("No artwork loaded", "Add files to the queue to see preview.")
             self._preview_view = None
             self._preview_edge_targets = []
             return
@@ -1499,17 +2234,25 @@ class App(BaseTk):
         if not widths:
             self.preview_var.set("Target: -")
             if hasattr(self, "preview_canvas"):
-                self.preview_canvas.delete("all")
+                self._render_preview_empty("No artwork loaded", "Add files to the queue to see preview.")
             self._preview_view = None
             self._preview_edge_targets = []
             return
 
         bleed_eff = max(0.0, bleed)
         overlap_mode = normalize_overlap_mode(self.overlap_mode_var.get())
+        if len(widths) > 1 and overlap >= min(widths):
+            self.preview_var.set(
+                f"Invalid overlap: {fmt_mm(overlap)} mm must be smaller than the narrowest panel ({fmt_mm(min(widths))} mm)."
+            )
+            self._render_preview_empty("Invalid panel overlap", "Reduce overlap or increase the narrowest panel width.")
+            self._preview_view = None
+            self._preview_edge_targets = []
+            return
         panel_layout, total_w, overlap = compute_panel_layout(widths, bleed_eff, overlap, overlap_mode)
         n = len(panel_layout)
         fit_mode = "stretch"
-        pv = self.export_mode_var.get() == "Vector"
+        pv = core_is_pdf_preserve_mode(self.export_mode_var.get())
         page_h = compute_preview_page_height(total_w, height, bleed_eff, pv, fit_mode, self._src_w_mm, self._src_h_mm)
 
         if pv and fit_mode == "width":
@@ -1518,9 +2261,16 @@ class App(BaseTk):
             h_txt = fmt_mm(page_h)
 
         w_txt = fmt_mm(total_w)
+        scale_text = ""
+        if self._src_w_mm and self._src_h_mm and self._src_w_mm > 0 and self._src_h_mm > 0 and height > 0:
+            scale_x = (sum(widths) / self._src_w_mm) * 100.0
+            scale_y = (height / self._src_h_mm) * 100.0
+            distortion = abs((scale_x / scale_y) - 1.0) if scale_y else 0.0
+            warning = " - ASPECT STRETCH" if distortion > 0.01 else ""
+            scale_text = f"   |   Scale X {scale_x:.1f}% / Y {scale_y:.1f}%{warning}"
         self.preview_var.set(
             f"Target: {w_txt} x {h_txt} mm   |   Panels: {n}   "
-            f"(Bleed {fmt_mm(bleed_eff)} / Overlap {fmt_mm(overlap)} {overlap_mode})"
+            f"(Bleed {fmt_mm(bleed_eff)} / Overlap {fmt_mm(overlap)} {overlap_mode}){scale_text}"
         )
 
         # Draw the visual preview on the canvas
@@ -1529,6 +2279,60 @@ class App(BaseTk):
         except Exception:
             # Ignore drawing errors in preview
             pass
+
+    def _render_preview_empty(self, title: str, detail: str):
+        if not hasattr(self, "preview_canvas"):
+            return
+        cv = self.preview_canvas
+        cv.delete("all")
+        C = getattr(self, "_theme_tokens", get_theme(self.theme_var.get()).colors)
+        cw = max(1, int(cv.winfo_width()))
+        ch = max(1, int(cv.winfo_height()))
+        pad = 22
+        cv.create_rectangle(
+            pad,
+            pad,
+            max(pad + 1, cw - pad),
+            max(pad + 1, ch - pad),
+            outline=C.get("workspace_border", C["card_border"]),
+            dash=(6, 5),
+            width=1,
+        )
+        cx = cw / 2
+        cy = ch / 2
+        icon_w = 92
+        icon_h = 72
+        icon_x0 = cx - icon_w / 2
+        icon_y0 = cy - 92
+        icon_border = C.get("card_border", C["border"])
+        icon_fill = C.get("tip_bg", C["card_bg_raised"])
+        cv.create_rectangle(icon_x0, icon_y0, icon_x0 + icon_w, icon_y0 + icon_h, outline=icon_border, fill=icon_fill, width=2)
+        cv.create_polygon(
+            icon_x0 + 12,
+            icon_y0 + icon_h - 12,
+            icon_x0 + 36,
+            icon_y0 + 38,
+            icon_x0 + 58,
+            icon_y0 + 58,
+            icon_x0 + 78,
+            icon_y0 + 28,
+            icon_x0 + icon_w - 10,
+            icon_y0 + icon_h - 12,
+            fill=icon_border,
+            outline="",
+        )
+        cv.create_oval(icon_x0 + icon_w - 30, icon_y0 + 16, icon_x0 + icon_w - 14, icon_y0 + 32, fill=icon_border, outline="")
+        cv.create_text(cx, cy + 8, text=title, fill=C["text_primary"], font=("Segoe UI", 13, "bold"))
+        cv.create_text(cx, cy + 34, text=detail, fill=C["text_secondary"], font=("Segoe UI", 10))
+        cv.create_rectangle(40, max(40, ch - 58), max(41, cw - 40), max(41, ch - 22), outline=C["card_border"], fill=C["tip_bg"])
+        cv.create_text(
+            58,
+            max(58, ch - 40),
+            text="Tip: middle mouse pans - mouse wheel zooms - drag internal seams to edit panels",
+            anchor="w",
+            fill=C["text_secondary"],
+            font=("Segoe UI", 9),
+        )
 
     def _render_preview_canvas(self, panel_layout, bleed_mm, page_h_mm, total_w_mm):
         if not hasattr(self, "preview_canvas"):
@@ -1553,6 +2357,7 @@ class App(BaseTk):
         bleed_fill = C.get("preview_bleed", "#d64a4a")
         label_bg = C.get("panel", "#222222")
         label_fg = C.get("fg", "#ffffff")
+        cv.create_rectangle(10, 10, max(11, cw - 10), max(11, ch - 10), outline=C["card_border"], fill=C["canvas_bg"])
 
         # Scale to fit and center
         sx = (cw - 2 * pad) / float(total_w_mm)
@@ -1645,40 +2450,220 @@ class App(BaseTk):
 
     # ---------- Run ----------
     def _validate_profile_for_export(self, profile: ArtworkProfile):
-        profile.validate_output_name()
         bleed_mm = float(profile.bleed_mm)
         widths_mm = parse_widths_list(profile.panel_widths)
         height_mm = float(profile.height_mm)
         overlap_txt = profile.overlap_mm.strip()
         overlap_mm = (2 * bleed_mm) if overlap_txt == "" else float(overlap_txt)
-        overlap_mode = normalize_overlap_mode(profile.overlap_mode)
-        export_fmt = profile.export_format.lower()
-        preserve_vectors = profile.export_mode == "Vector"
+        preserve_vectors = core_is_pdf_preserve_mode(profile.export_mode)
         dpi_txt = profile.dpi.strip()
-        if preserve_vectors:
+        try:
+            dpi = int(dpi_txt) if dpi_txt else None
+        except ValueError:
+            if preserve_vectors:
+                dpi = None
+            else:
+                raise ValueError("DPI must be a whole number.")
+        values = validate_export_values(
+            output_name=profile.file_name,
+            bleed_mm=bleed_mm,
+            widths_mm=widths_mm,
+            height_mm=height_mm,
+            overlap_mm=overlap_mm,
+            overlap_mode=profile.overlap_mode,
+            dpi=dpi,
+            export_format=profile.export_format,
+            preserve_vectors=preserve_vectors,
+            color_mode=profile.color_mode,
+        )
+        if not preserve_vectors and profile.icc_mode != "Off":
+            if not profile.icc_profile_path.strip() or not Path(profile.icc_profile_path).expanduser().is_file():
+                raise ValueError("Choose a valid output ICC profile, or set ICC Handling to Off.")
+        return (
+            values.bleed_mm,
+            values.widths_mm,
+            values.height_mm,
+            values.overlap_mm,
+            values.overlap_mode,
+            values.dpi,
+            values.export_format,
+            values.preserve_vectors,
+            values.color_mode,
+            profile.icc_mode,
+            profile.icc_profile_path,
+            profile.rendering_intent,
+        )
+
+    def _set_export_busy(self, busy: bool):
+        self._export_running = busy
+        if hasattr(self, "start_export_button"):
+            self.start_export_button.configure(state="disabled" if busy else "normal")
+        if hasattr(self, "cancel_export_button"):
+            self.cancel_export_button.configure(state="normal" if busy else "disabled")
+        if hasattr(self, "retry_failed_button"):
+            self.retry_failed_button.configure(state="disabled" if busy else "normal")
+        self._set_settings_enabled(bool(self._active_iid) and not busy)
+
+    def on_cancel_export(self):
+        if not self._export_running:
+            return
+        self._export_cancel_event.set()
+        self.cancel_export_button.configure(state="disabled")
+        self.status_var.set("Cancelling after the current panel finishes...")
+
+    def on_retry_failed(self):
+        if self._export_running:
+            return
+        retry_iids = []
+        for iid, profile in self._profiles.items():
+            retry = profile.output_status in {"Error", "Cancelled", "Processing", "Interrupted"}
+            profile.selected = retry
+            if retry:
+                retry_iids.append(iid)
+            self._update_profile_row(iid)
+        if not retry_iids:
+            messagebox.showinfo("Nothing to retry", "There are no failed or interrupted queue items.")
+            return
+        self.status_var.set(f"Ready to retry {len(retry_iids)} failed/interrupted job(s).")
+        self.on_start()
+
+    def _preflight_output_plan(self, outdir: Path, export_jobs):
+        if not str(self.outdir_var.get()).strip():
+            raise ValueError("Choose an output folder before exporting.")
+        try:
+            outdir.mkdir(parents=True, exist_ok=True)
+            if not outdir.is_dir():
+                raise ValueError(f"Output path is not a folder: {outdir}")
+            with tempfile.NamedTemporaryFile(prefix=".artboard-cutter-write-test-", dir=outdir, delete=True):
+                pass
+        except Exception as exc:
+            raise ValueError(f"Output folder is not writable: {outdir}\n{exc}") from exc
+
+        estimates = []
+        for _iid, _source_path, output_name, _page_index, values in export_jobs:
+            estimate = estimate_export_job(
+                widths_mm=values[1],
+                height_mm=values[2],
+                bleed_mm=values[0],
+                overlap_mm=values[3],
+                overlap_mode=values[4],
+                dpi=values[5],
+                color_mode=values[8],
+                export_format=values[6],
+                preserve_vectors=values[7],
+                output_root=outdir,
+            )
+            estimates.append((output_name, estimate))
+        total_panels = sum(estimate.panel_count for _name, estimate in estimates)
+        total_disk = sum(estimate.estimated_disk_bytes for _name, estimate in estimates)
+        warnings = [f"{name}: {warning}" for name, estimate in estimates for warning in estimate.warnings]
+        details = [
+            f"Jobs: {len(estimates)}   Panels: {total_panels}",
+            f"Estimated output space: {format_bytes(total_disk)}",
+        ]
+        if warnings:
+            details.extend(["", *warnings[:8]])
+        if not messagebox.askyesno(
+            "Export preflight",
+            "\n".join(details) + "\n\nContinue with export?",
+        ):
+            raise ValueError("Export cancelled during preflight.")
+        for name, estimate in estimates:
+            self.log_print(f"[PREFLIGHT] {name}: " + "; ".join(estimate.summary_lines()))
+
+        planned_paths = []
+        stale_paths = []
+        for _iid, _source_path, output_name, _page_index, values in export_jobs:
+            widths_mm = values[1]
+            export_fmt = values[6]
+            preserve_vectors = values[7]
+            paths = build_output_paths(
+                outdir,
+                output_name,
+                len(widths_mm),
+                export_fmt,
+                preserve_vectors=preserve_vectors,
+            )
+            planned_paths.extend(paths)
+            stale_paths.extend(find_stale_panel_outputs(paths))
+
+        duplicates = find_duplicate_paths(planned_paths)
+        if duplicates:
+            raise ValueError(
+                f"Two selected jobs would write the same file:\n{duplicates[0]}\n"
+                "Rename one of the queue items before exporting."
+            )
+
+        existing = [path for path in planned_paths if path.exists()]
+        conflicts = sorted({*existing, *stale_paths}, key=lambda path: str(path).casefold())
+        if not conflicts:
+            return False, False
+        preview = "\n".join(str(path.name) for path in conflicts[:8])
+        if len(conflicts) > 8:
+            preview += f"\n...and {len(conflicts) - 8} more"
+        approved = messagebox.askyesno(
+            "Replace existing panel outputs?",
+            "The following existing panel files belong to these output names:\n\n"
+            f"{preview}\n\nReplace the planned files and remove stale extra panels only after each job succeeds?",
+        )
+        if not approved:
+            raise ValueError("Export cancelled because output files already exist.")
+        return True, True
+
+    def _poll_export_events(self):
+        while True:
             try:
-                dpi = int(dpi_txt) if dpi_txt else 72
-            except ValueError:
-                dpi = 72
-        else:
-            if not dpi_txt:
-                raise ValueError("DPI is required for Raster export.")
-            dpi = int(dpi_txt)
-        if bleed_mm < 0:
-            raise ValueError("Bleed must be 0 or greater.")
-        if overlap_mm < 0:
-            raise ValueError("Overlap must be 0 or greater.")
-        if not widths_mm or any(w <= 0 for w in widths_mm):
-            raise ValueError("Panel widths must contain one or more positive numbers.")
-        if height_mm <= 0:
-            raise ValueError("Height must be greater than 0.")
-        if not preserve_vectors and dpi <= 0:
-            raise ValueError("DPI must be greater than 0.")
-        if preserve_vectors:
-            export_fmt = "pdf"
-        return bleed_mm, widths_mm, height_mm, overlap_mm, overlap_mode, dpi, export_fmt, preserve_vectors
+                event = self._export_events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event[0]
+            if kind == "log":
+                self.log_print(event[1])
+            elif kind == "call":
+                event[1]()
+            elif kind == "import_ready":
+                _, path, profiles, error, defaults = event
+                self._insert_imported_profiles(path, profiles, error, defaults)
+            elif kind == "preview_ready":
+                _, request, image, error = event
+                if request == self._preview_request:
+                    self._bg_preview_im = image
+                    self._bg_preview_tk = None
+                    if error:
+                        self.log_print(f"[WARN] Could not render preview: {request[1]} ({error})")
+                    self._update_preview()
+            elif kind == "status":
+                self.status_var.set(event[1])
+            elif kind == "job_state":
+                _, iid, output_status, validation_state = event
+                profile = self._profiles.get(iid)
+                if profile:
+                    profile.output_status = output_status
+                    profile.validation_state = validation_state
+                    self._update_profile_row(iid)
+                    self._schedule_recovery_save()
+            elif kind == "progress":
+                self.progress["value"] = event[1]
+            elif kind in {"done", "cancelled"}:
+                _, count, errors, outdir = event
+                self._set_export_busy(False)
+                self._export_thread = None
+                if kind == "cancelled":
+                    message = f"Cancelled. {count} succeeded, {errors} failed. Completed outputs: {outdir}"
+                else:
+                    message = f"Done. {count} succeeded, {errors} failed. Outputs: {outdir}"
+                self.log_print("")
+                self.log_print(message)
+                self.status_var.set(message)
+                if self._close_after_export:
+                    self._save_settings()
+                    self.destroy()
+                    return
+        self.after(50, self._poll_export_events)
 
     def on_start(self):
+        if self._export_running:
+            return
         self._save_selected_profile_settings()
         checked_items = [(iid, p) for iid, p in self._profiles.items() if p.selected]
         if not checked_items:
@@ -1688,37 +2673,83 @@ class App(BaseTk):
             return
 
         export_jobs = []
+        distortion_warnings = []
         try:
             for iid, profile in checked_items:
                 values = self._validate_profile_for_export(profile)
-                export_jobs.append((iid, profile, values))
+                export_jobs.append(
+                    (iid, Path(profile.file_path), profile.file_name, profile.source_page_index, values)
+                )
                 profile.validation_state = "valid"
                 self._update_profile_row(iid)
+                if profile.original_width_mm and profile.original_height_mm:
+                    scale_x = sum(values[1]) / profile.original_width_mm
+                    scale_y = values[2] / profile.original_height_mm
+                    if scale_y and abs((scale_x / scale_y) - 1.0) > 0.01:
+                        distortion_warnings.append(
+                            f"{profile.file_name}: X {scale_x * 100:.1f}% / Y {scale_y * 100:.1f}%"
+                        )
         except Exception as e:
             msg = str(e) if str(e) else "Please check bleed, overlap, panel widths, height, DPI, and format."
             self.status_var.set(msg)
             messagebox.showerror("Invalid parameters", msg)
             return
 
+        if distortion_warnings:
+            preview = "\n".join(distortion_warnings[:8])
+            if len(distortion_warnings) > 8:
+                preview += f"\n...and {len(distortion_warnings) - 8} more"
+            if not messagebox.askyesno(
+                "Non-uniform artwork stretch",
+                "The target proportions differ from the source, so these jobs will be stretched differently on X and Y:\n\n"
+                f"{preview}\n\nContinue with the requested dimensions?",
+            ):
+                self.status_var.set("Export cancelled before stretching artwork.")
+                return
+
         outdir = Path(self.outdir_var.get()).expanduser()
-        outdir.mkdir(parents=True, exist_ok=True)
+        try:
+            overwrite, cleanup_stale = self._preflight_output_plan(outdir, export_jobs)
+        except Exception as exc:
+            self.status_var.set(str(exc))
+            messagebox.showerror("Cannot start export", str(exc))
+            return
         self._save_settings()
 
         self.progress["value"] = 0
         self.progress["maximum"] = len(export_jobs)
         self.status_var.set(f"Exporting {len(export_jobs)} file(s)...")
+        self._export_cancel_event.clear()
+        self._close_after_export = False
+        self._set_export_busy(True)
 
         def work():
             count = 0
             errors = 0
-            for i, (iid, profile, values) in enumerate(export_jobs, 1):
-                bleed_mm, widths_mm, height_mm, overlap_mm, overlap_mode, dpi, export_fmt, preserve_vectors = values
+            cancelled = False
+            for i, (iid, source_path, output_name, page_index, values) in enumerate(export_jobs, 1):
+                if self._export_cancel_event.is_set():
+                    cancelled = True
+                    break
+                (
+                    bleed_mm,
+                    widths_mm,
+                    height_mm,
+                    overlap_mm,
+                    overlap_mode,
+                    dpi,
+                    export_fmt,
+                    preserve_vectors,
+                    color_mode,
+                    icc_mode,
+                    icc_profile_path,
+                    rendering_intent,
+                ) = values
                 try:
-                    profile.output_status = "Processing"
-                    self._update_profile_row(iid)
-                    self.status_var.set(f"Processing {profile.file_name} ({i}/{len(export_jobs)})")
+                    self._export_events.put(("job_state", iid, "Processing", "valid"))
+                    self._export_events.put(("status", f"Processing {output_name} ({i}/{len(export_jobs)})"))
                     process_file(
-                        Path(profile.file_path),
+                        source_path,
                         bleed_mm=bleed_mm,
                         widths_mm=widths_mm,
                         height_mm=height_mm,
@@ -1729,35 +2760,75 @@ class App(BaseTk):
                         export_fmt=export_fmt,
                         preserve_vectors=preserve_vectors,
                         vector_fit_mode="stretch",
-                        page_index=profile.source_page_index,
-                        output_name=profile.file_name,
-                        log_cb=self.log_print,
+                        page_index=page_index,
+                        output_name=output_name,
+                        overwrite=overwrite,
+                        cleanup_stale=cleanup_stale,
+                        cancel_check=self._export_cancel_event.is_set,
+                        color_mode=color_mode,
+                        icc_mode=icc_mode,
+                        icc_profile_path=icc_profile_path,
+                        rendering_intent=rendering_intent,
+                        log_cb=lambda message: self._export_events.put(("log", message)),
                     )
-                    profile.output_status = "Done"
-                    profile.validation_state = "valid"
+                    self._export_events.put(("job_state", iid, "Done", "valid"))
                     count += 1
+                except ExportCancelled:
+                    self._export_events.put(("job_state", iid, "Cancelled", "pending"))
+                    cancelled = True
+                    break
                 except Exception as e:
                     errors += 1
-                    profile.output_status = "Error"
-                    profile.validation_state = "error"
-                    self.log_print(f"[ERROR] {profile.file_path}: {e}")
+                    self._export_events.put(("job_state", iid, "Error", "error"))
+                    self._export_events.put(("log", f"[ERROR] {source_path}: {e}"))
                 finally:
-                    self._update_profile_row(iid)
-                    self.progress["value"] = i
-            self.log_print("")
-            self.log_print(f"Done. Processed {count}/{len(export_jobs)} file(s). Outputs in: {outdir}")
-            self.status_var.set(f"Done. {count} succeeded, {errors} failed. Outputs: {outdir}")
+                    self._export_events.put(("progress", i))
+            self._export_events.put(("cancelled" if cancelled else "done", count, errors, outdir))
 
-        threading.Thread(target=work, daemon=True).start()
+        self._export_thread = threading.Thread(target=work, daemon=False)
+        self._export_thread.start()
+
+def run_packaged_self_test() -> None:
+    """Exercise the lazy-loaded TIFF codec path used by the one-file release build."""
+    if not PIL_AVAILABLE:
+        raise RuntimeError("Pillow is unavailable in the packaged application.")
+    with tempfile.TemporaryDirectory(prefix="artboard-cutter-self-test-") as td:
+        root = Path(td)
+        source = root / "source.png"
+        image = Image.new("RGB", (48, 32))
+        for x in range(image.width):
+            for y in range(image.height):
+                image.putpixel((x, y), (x * 5 % 256, y * 7 % 256, (x + y) * 3 % 256))
+        image.save(source)
+        result = process_file(
+            source,
+            bleed_mm=0,
+            widths_mm=[48],
+            height_mm=32,
+            overlap_mm=0,
+            dpi=72,
+            output_root=root / "out",
+            export_fmt="tiff",
+            output_name="self-test",
+        )
+        output = result.output_paths[0]
+        with Image.open(output) as checked:
+            checked.load()
+            if checked.format != "TIFF" or checked.mode != "RGB":
+                raise RuntimeError("Packaged TIFF self-test produced an invalid output.")
+
 
 def main():
+    if "--self-test" in sys.argv:
+        try:
+            run_packaged_self_test()
+        except Exception:
+            Path("packaged-self-test-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+            os._exit(1)
+        os._exit(0)
     app = App()
     app.mainloop()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-

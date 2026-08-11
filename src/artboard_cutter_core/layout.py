@@ -42,6 +42,29 @@ def split_last_panel_width(widths_mm: list[float] | tuple[float, ...]) -> list[f
     return widths[:-1] + [half, half]
 
 
+def redistribute_panel_widths(total_width_mm: float, panel_count: int) -> list[float]:
+    """Divide a content width evenly while preserving the exact floating-point total."""
+    total = float(total_width_mm)
+    count = int(panel_count)
+    if total <= 0:
+        raise ValueError("Total artwork width must be greater than 0.")
+    if count < 1:
+        raise ValueError("Panel count must be at least 1.")
+    width = total / count
+    widths = [width] * count
+    # Put any floating-point remainder in the final panel so sum(widths) stays exact.
+    widths[-1] = total - sum(widths[:-1])
+    return widths
+
+
+def add_evenly_distributed_panel(widths_mm: list[float] | tuple[float, ...]) -> list[float]:
+    """Add one panel and redistribute the complete artwork width evenly."""
+    widths = [float(width) for width in widths_mm]
+    if not widths or any(width <= 0 for width in widths):
+        raise ValueError("Panel widths must contain one or more positive numbers.")
+    return redistribute_panel_widths(sum(widths), len(widths) + 1)
+
+
 def resize_adjacent_panel_widths(
     widths_mm: list[float] | tuple[float, ...],
     edge_index: int,
