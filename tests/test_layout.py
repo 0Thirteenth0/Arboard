@@ -3,10 +3,13 @@ import unittest
 from src.artboard_cutter_core.layout import (
     add_evenly_distributed_panel,
     compute_panel_layout,
+    compute_preview_page_height,
     parse_widths_list,
+    redistribute_panel_widths,
     resize_adjacent_panel_widths,
     split_last_panel_width,
 )
+from src.artboard_cutter_core.units import preview_render_scale
 
 
 class PanelLayoutTests(unittest.TestCase):
@@ -54,6 +57,20 @@ class PanelLayoutTests(unittest.TestCase):
     def test_parse_widths_accepts_commas_and_spaces(self):
         self.assertEqual(parse_widths_list("100, 200 300"), [100.0, 200.0, 300.0])
 
+    def test_non_finite_panel_math_is_rejected(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    parse_widths_list(str(value))
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    redistribute_panel_widths(value, 2)
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    compute_panel_layout([100, value], 0, 0)
+
+    def test_preview_height_rejects_non_finite_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "finite"):
+            compute_preview_page_height(100, float("nan"), 0, False, "stretch", None, None)
+
     def test_split_last_panel_preserves_total_width(self):
         widths = split_last_panel_width([1200, 1200, 1100])
         self.assertEqual(widths, [1200.0, 1200.0, 550.0, 550.0])
@@ -90,6 +107,16 @@ class PanelLayoutTests(unittest.TestCase):
             resize_adjacent_panel_widths([1000, 800], -1, 10)
         with self.assertRaises(IndexError):
             resize_adjacent_panel_widths([1000, 800], 1, 10)
+
+    def test_resize_rejects_impossible_minimum_width(self):
+        with self.assertRaisesRegex(ValueError, "too large"):
+            resize_adjacent_panel_widths([10, 10], 0, 0, min_width_mm=11)
+
+    def test_preview_render_scale_never_exceeds_pixel_budget(self):
+        huge_dimension = 200_000.0
+        scale = preview_render_scale(huge_dimension, max_pixels=1600)
+        self.assertLessEqual(huge_dimension * scale, 1600.000001)
+        self.assertGreater(scale, 0)
 
 
 if __name__ == "__main__":

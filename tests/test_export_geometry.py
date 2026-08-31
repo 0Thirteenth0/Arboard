@@ -13,7 +13,14 @@ from src.artboard_cutter_core.errors import ExportCancelled, ExportError
 from src.artboard_cutter_core.output_io import OutputConflictError, StagedOutputSet
 from src.artboard_cutter_core.raster_export import MAX_RENDER_BYTES, choose_safe_raster_dpi
 from src.artboard_cutter_core.units import pt_to_mm
-from tests.helpers import make_grid_pdf, make_multipage_pdf, make_rotated_pdf, make_unusual_page_box_pdf, render_pdf_page_rgb
+from tests.helpers import (
+    make_grid_pdf,
+    make_layered_pdf,
+    make_multipage_pdf,
+    make_rotated_pdf,
+    make_unusual_page_box_pdf,
+    render_pdf_page_rgb,
+)
 
 
 class ExportGeometryTests(unittest.TestCase):
@@ -83,6 +90,40 @@ class ExportGeometryTests(unittest.TestCase):
             process_file(src, options)
             self.assert_pdf_size_mm(options.output_root / "grid_1.pdf", 120, 120)
             self.assert_pdf_size_mm(options.output_root / "grid_2.pdf", 120, 120)
+
+    def test_pdf_preserve_keeps_default_hidden_layers_hidden(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "layered.pdf"
+            make_layered_pdf(src)
+            options = ExportOptions(
+                bleed_mm=0,
+                widths_mm=[100],
+                height_mm=60,
+                overlap_mm=0,
+                dpi=72,
+                output_root=root / "out",
+                export_fmt="pdf",
+                preserve_vectors=True,
+                vector_fit_mode="stretch",
+            )
+
+            result = process_file(src, options)
+
+            output = fitz.open(result.output_paths[0])
+            try:
+                states = {details["name"]: details["on"] for details in output.get_ocgs().values()}
+                self.assertEqual(states, {"Visible artwork": True, "Hidden do not print": False})
+                pix = output.load_page(0).get_pixmap(dpi=36, colorspace=fitz.csRGB, alpha=False)
+                samples = bytes(pix.samples)
+                right_half = []
+                for y in range(pix.height):
+                    start = (y * pix.width + pix.width // 2) * 3
+                    end = (y * pix.width + pix.width) * 3
+                    right_half.extend(samples[start:end])
+                self.assertGreater(sum(right_half) / len(right_half), 245)
+            finally:
+                output.close()
 
     def test_left_overlap_panel_dimensions(self):
         with tempfile.TemporaryDirectory() as td:
@@ -264,6 +305,27 @@ class ExportGeometryTests(unittest.TestCase):
                 self.assertEqual(image.format, "TIFF")
                 self.assertEqual(image.size, (394, 197))
 
+    def test_every_multi_panel_tiff_from_raster_source_contains_artwork(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "gradient.jpg"
+            source = Image.new("RGB", (300, 100))
+            for x in range(source.width):
+                for y in range(source.height):
+                    source.putpixel((x, y), (x % 256, y * 2 % 256, (x + y) % 256))
+            source.save(src, quality=95)
+
+            result = process_file(
+                src,
+                ExportOptions(0, [100, 100, 100], 100, 0, 72, root / "out", export_fmt="tiff"),
+            )
+
+            self.assertEqual(len(result.output_paths), 3)
+            for output in result.output_paths:
+                with self.subTest(output=output.name), Image.open(output) as image:
+                    extrema = image.convert("RGB").getextrema()
+                    self.assertTrue(any(low != high for low, high in extrema), f"{output.name} is blank/uniform")
+
     def test_cmyk_raster_exports_preserve_cmyk_image_mode(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -302,6 +364,55 @@ class ExportGeometryTests(unittest.TestCase):
             finally:
                 doc.close()
 
+    def test_pdf_preserve_width_fit_uses_source_aspect_height(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+            result = process_file(
+                src,
+                ExportOptions(
+                    0,
+                    [50, 50],
+                    80,
+                    0,
+                    72,
+                    root / "out",
+                    preserve_vectors=True,
+                    vector_fit_mode="width",
+                ),
+            )
+
+            for output in result.output_paths:
+                doc = fitz.open(output)
+                try:
+                    rect = doc.load_page(0).rect
+                    self.assertAlmostEqual(pt_to_mm(rect.width), 50, places=2)
+                    self.assertAlmostEqual(pt_to_mm(rect.height), 50, places=2)
+                finally:
+                    doc.close()
+
+    def test_pdf_preserve_rejects_unknown_fit_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "grid.pdf"
+            make_grid_pdf(src, width_mm=100, height_mm=50)
+
+            with self.assertRaisesRegex(ExportError, "Unsupported PDF Preserve fit mode"):
+                process_file(
+                    src,
+                    ExportOptions(
+                        0,
+                        [100],
+                        50,
+                        0,
+                        72,
+                        root / "out",
+                        preserve_vectors=True,
+                        vector_fit_mode="diagonal",
+                    ),
+                )
+
     def test_source_open_failure_is_raised(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -320,6 +431,19 @@ class ExportGeometryTests(unittest.TestCase):
                 process_file(src, options)
             self.assertIsInstance(caught.exception.__cause__, OutputConflictError)
             process_file(src, ExportOptions(0, [100], 50, 0, 72, root / "out", overwrite=True))
+
+    def test_output_created_during_export_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            final = Path(td) / "panel_1.pdf"
+            outputs = StagedOutputSet([final], overwrite=False)
+            outputs.stage_paths[0].write_bytes(b"new export")
+            final.write_bytes(b"external file")
+
+            with self.assertRaisesRegex(OutputConflictError, "appeared during export"):
+                outputs.commit()
+            outputs.cleanup()
+
+            self.assertEqual(final.read_bytes(), b"external file")
 
     def test_cancelled_export_leaves_no_partial_outputs(self):
         with tempfile.TemporaryDirectory() as td:

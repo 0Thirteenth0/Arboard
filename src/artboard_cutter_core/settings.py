@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,6 +23,8 @@ EXPORT_PRESET_FIELDS = (
     "rendering_intent",
 )
 
+_WINDOW_GEOMETRY_PATTERN = re.compile(r"^[1-9]\d*x[1-9]\d*(?:[+-]\d+[+-]\d+)?$")
+
 
 def normalize_export_presets(presets) -> dict[str, dict[str, str]]:
     """Keep presets limited to reusable export behavior, never artwork paths or dimensions."""
@@ -36,25 +39,6 @@ def normalize_export_presets(presets) -> dict[str, dict[str, str]]:
             for key in EXPORT_PRESET_FIELDS
             if key in values and values[key] is not None
         }
-    return normalized
-
-
-def normalize_layout_templates(templates) -> dict[str, dict[str, object]]:
-    """Validate reusable panel proportions without coupling them to artwork dimensions."""
-    if not isinstance(templates, dict):
-        return {}
-    normalized = {}
-    for name, values in templates.items():
-        if not isinstance(name, str) or not name.strip() or not isinstance(values, dict):
-            continue
-        try:
-            ratios = [float(value) for value in values.get("ratios", [])]
-        except (TypeError, ValueError):
-            continue
-        total = sum(ratios)
-        if not ratios or total <= 0 or any(value <= 0 for value in ratios):
-            continue
-        normalized[name.strip()] = {"ratios": [value / total for value in ratios]}
     return normalized
 
 
@@ -75,7 +59,6 @@ class AppSettings:
     recent_files: list[str] | None = None
     recent_output_dirs: list[str] | None = None
     presets: dict[str, dict[str, str]] | None = None
-    layout_templates: dict[str, dict[str, object]] | None = None
     theme: str = "Soft Blue"
     window_geometry: str = ""
 
@@ -106,15 +89,29 @@ def load_settings(path: Path | None = None) -> AppSettings:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except Exception:
         return AppSettings()
-    settings = AppSettings(**{k: v for k, v in data.items() if k in AppSettings.__dataclass_fields__})
-    if not isinstance(settings.recent_files, list):
-        settings.recent_files = []
-    if not isinstance(settings.recent_output_dirs, list):
-        settings.recent_output_dirs = []
+    if not isinstance(data, dict):
+        return AppSettings()
+    values = {k: v for k, v in data.items() if k in AppSettings.__dataclass_fields__}
+    collection_fields = {"recent_files", "recent_output_dirs", "presets"}
+    for key in list(values):
+        if key not in collection_fields and not isinstance(values[key], str):
+            values.pop(key)
+    settings = AppSettings(**values)
+    settings.recent_files = (
+        [item for item in settings.recent_files if isinstance(item, str) and item.strip()]
+        if isinstance(settings.recent_files, list)
+        else []
+    )
+    settings.recent_output_dirs = (
+        [item for item in settings.recent_output_dirs if isinstance(item, str) and item.strip()]
+        if isinstance(settings.recent_output_dirs, list)
+        else []
+    )
     settings.presets = normalize_export_presets(settings.presets)
-    settings.layout_templates = normalize_layout_templates(settings.layout_templates)
     settings.color_mode = "CMYK" if str(settings.color_mode).upper() == "CMYK" else "RGB"
     settings.export_mode = normalize_export_mode(settings.export_mode)
+    if settings.window_geometry and not _WINDOW_GEOMETRY_PATTERN.fullmatch(settings.window_geometry):
+        settings.window_geometry = ""
     return settings
 
 
@@ -122,7 +119,6 @@ def save_settings(settings: AppSettings, path: Path | None = None) -> None:
     settings_path = path or default_settings_path()
     settings.export_mode = normalize_export_mode(settings.export_mode)
     settings.presets = normalize_export_presets(settings.presets)
-    settings.layout_templates = normalize_layout_templates(settings.layout_templates)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(settings), indent=2)
     temp_path = None

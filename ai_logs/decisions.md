@@ -228,9 +228,43 @@ Track product and implementation decisions here.
 
 ## 2026-08-09 - Production hardening decisions
 
-- Keep layout templates separate from export presets. Templates store proportions and preserve the active artwork's overall width.
 - Use streamed TIFF strips instead of reducing TIFF DPI to control memory. JPG and raster PDF retain the shared safe-DPI rule.
 - Verify staged outputs before commit and reject silent blank/uniform renders.
 - Support explicit ICC conversion/assignment and preserve the selected output profile through TIFF/JPG embedding or a raster-PDF output intent.
 - Persist an atomic recovery queue during active sessions; normal close removes it, while abnormal shutdown offers restore and retry.
 - Complete artwork dimensions and paths belong in saved queue job files instead.
+
+## 2026-08-11 - Remove Layout Template
+
+- Remove the Layout Template control and saved-template model because the feature adds interface complexity without improving the normal production workflow.
+- Use **Panels / Set** and **Add Panel** for equal division of the complete artwork width, or edit **Panel Widths** directly for custom unequal layouts.
+- Keep export presets focused only on reusable export behavior; they still do not change artwork dimensions or the output folder.
+- Ignore obsolete `layout_templates` keys when loading older settings files rather than requiring a manual migration.
+
+## 2026-08-11 - Post-audit reliability pass
+
+- Treat multi-page parent removal as one atomic queue operation; recursive child cleanup must not delete a parent that the caller is still processing.
+- Mark every selected but unstarted job as Interrupted after cancellation so Retry Failed / Resume represents the entire unfinished batch.
+- Reject all non-finite numeric production values before geometry or rendering.
+- Estimate PDF Preserve disk use conservatively from source size and evaluate free space for the combined batch.
+- Make requested ICC embedding and unexpected PDF Preserve blank output verification failures, not warnings.
+- Bound preview rendering by its pixel budget and discard obsolete preview requests before they acquire the PDF lock.
+- Use `src/artboard_cutter_core/version.py` as the single release-version source and generate installer/executable metadata during builds.
+
+## 2026-08-11 - Make Tk a release gate
+
+- Treat a PyInstaller `tkinter` exclusion as a failed release even when source-level GUI tests pass.
+- Keep the explicit Windows Tcl/Tk collection hooks until upstream PyInstaller correctly detects the standalone Python 3.14 layout.
+- Require the packaged self-test to initialize the actual Tk/TkDND runtime as well as export TIFF.
+
+## 2026-08-26 - Preserve hidden layers and use a dedicated job extension
+
+- Restore PDF optional-content default visibility after every `show_pdf_page` import rather than flattening Illustrator layers; this retains vector content and makes PDF Preserve match the live preview's default-visible artwork.
+- Use `.artboard-job` for newly saved jobs and Windows association. Continue reading `.artboard-job.json`, but never associate the generic `.json` extension.
+- Load an Explorer-provided job only after the main Tk UI exists, and skip crash-recovery prompting during that explicit document launch.
+
+## 2026-08-30 - Keep distribution unsigned
+
+- The user chose to skip code signing. Keep unsigned standalone/installer builds and document Windows publisher warnings; do not enroll in a paid signing service.
+- Retain the optional certificate-based build switch for a future explicitly requested signing workflow, but use an empty certificate argument for the documented unsigned build.
+- Keep executable/installer build products out of Git; binary release publishing is separate from committing source changes.

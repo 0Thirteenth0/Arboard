@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .concurrency import PDF_OPERATION_LOCK
 from .illustrator_integration import get_illustrator_artboard_names
-from .modes import PDF_PRESERVE_EXPORT_MODE, is_pdf_preserve_mode, normalize_export_mode
+from .modes import is_pdf_preserve_mode, normalize_export_mode
 from .pdf_io import open_pdf_robust
 from .units import fmt_mm
 
@@ -127,13 +127,18 @@ def sanitize_output_name(name: str, fallback: str) -> str:
     return validate_output_name(cleaned)
 
 
-def _unique_output_names(names: list[str]) -> list[str]:
-    seen: dict[str, int] = {}
+def make_unique_output_names(names: list[str]) -> list[str]:
+    """Return Windows-safe, case-insensitively unique output names."""
+    used: set[str] = set()
     result: list[str] = []
     for name in names:
-        count = seen.get(name, 0) + 1
-        seen[name] = count
-        result.append(name if count == 1 else f"{name}{count}")
+        candidate = name
+        suffix = 2
+        while candidate.casefold() in used:
+            candidate = f"{name}{suffix}"
+            suffix += 1
+        used.add(candidate.casefold())
+        result.append(candidate)
     return result
 
 
@@ -199,7 +204,7 @@ def _create_artwork_profiles_locked(
             raw_names = artboard_names[:page_count]
         else:
             raw_names = [stem if page_count == 1 else f"{stem}{idx + 1}" for idx in range(page_count)]
-        output_names = _unique_output_names(
+        output_names = make_unique_output_names(
             [sanitize_output_name(name, stem if page_count == 1 else f"{stem}{idx + 1}") for idx, name in enumerate(raw_names)]
         )
         for page_index in range(page_count):

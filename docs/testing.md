@@ -42,8 +42,10 @@ instead of failing unrelated CI jobs.
 - Streaming RGB/CMYK TIFF, ICC embedding, and raster-PDF output-intent checks.
 - Automatic output verification and blank/uniform-output rejection.
 - BigTIFF and large-job preflight decisions.
-- Proportional layout-template normalization and direct count redistribution.
-- Recovery-job serialization and retry/resume state coverage.
+- PDF Preserve size estimation and combined-batch disk-space warnings.
+- Direct panel-count redistribution across the unchanged overall artwork width.
+- Recovery-job serialization, clean-close cleanup, grouped queue removal, and retry/resume state coverage.
+- Finite numeric validation, strict ICC verification, and PDF Preserve blank-output rejection.
 
 - Theme WCAG contrast checks for all built-in theme foreground/background pairs.
 - Theme token presence checks for centralized design tokens such as background,
@@ -66,7 +68,6 @@ instead of failing unrelated CI jobs.
 Run these checks after `tkinter.Tk()` works locally:
 
 - Set the panel count directly and confirm every panel is redistributed across the unchanged total artwork width.
-- Save/apply a proportional layout template on artwork with a different total width.
 - Export ICC-managed JPG, TIFF, and raster PDF and inspect the embedded profile/output intent in the production color tool.
 - Cancel a multi-job run, restart the app abnormally, restore the recovery queue, and use `Retry Failed / Resume`.
 - Review the preflight panel count, effective DPI, estimated size, BigTIFF status, and free-space warning before continuing.
@@ -95,8 +96,8 @@ Run these checks after `tkinter.Tk()` works locally:
   Panel evenly dividing total artwork width across all panels, internal seam dragging, and seam-limit reset near neighboring seams or
   outside bleed edges.
 - Export one JPG and one TIFF and confirm no PDF is produced for those jobs.
-- Check both RGB and CMYK output in the target prepress software. Color mode is
-  encoded, but no ICC profile conversion or embedding is currently performed.
+- Check both RGB and CMYK output in the target prepress software. When ICC
+  handling is enabled, confirm conversion or embedding matches the selected profile.
 - Cancel a multi-panel export and confirm no partial replacement set remains.
 - Save/apply/delete a preset, then save and reload a complete queue job.
 - Shrink the application window vertically and horizontally. Confirm there are
@@ -175,3 +176,20 @@ Other local artifacts intentionally ignored by Git:
 - `TEST.pdf`
 - generated files under `logs/`
 - generated PDF/image exports
+
+## Comprehensive Diagnostic Pass
+
+The 2026-08-11 baseline runs the complete suite on a real Windows desktop so Tk, screenshot, threaded queue, and GUI-driven TIFF export checks do not skip:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m compileall -q artboard_cutter_gui_advanced.py src tests tools
+.\.venv\Scripts\python.exe -m pip check
+git diff --check
+```
+
+Expected baseline: 118 tests, 0 failures, 0 skips. Coverage includes every output format, RGB/CMYK, Shared/Left overlap, PDF Preserve layer visibility, multi-page input, cancellation/rollback, overwrite/stale cleanup, malformed persistence data, Explorer job launch, queue lifecycle, themes, recovery, and multi-panel TIFF content checks.
+
+For release acceptance, install the generated setup package and verify that double-clicking a `.artboard-job` file with spaces in its path launches Artboard Cutter and loads the saved queue. Legacy `.artboard-job.json` files should remain loadable from **Load Job...** but are intentionally not registered as the system-wide `.json` handler.
+
+Automated tests cannot prove the absence of every possible defect. Production acceptance still includes representative printer/RIP output, real Illustrator COM behavior, extreme BigTIFF jobs, linked assets, spot colors, overprint, and signed-installer checks.

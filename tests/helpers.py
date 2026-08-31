@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
@@ -97,6 +96,29 @@ def make_unusual_page_box_pdf(path: Path):
     doc.close()
 
 
+def make_layered_pdf(path: Path, width_mm=100, height_mm=60):
+    """Create one visible and one default-hidden optional-content group."""
+    doc = fitz.open()
+    page = doc.new_page(width=mm_to_pt(width_mm), height=mm_to_pt(height_mm))
+    visible = doc.add_ocg("Visible artwork", on=True)
+    hidden = doc.add_ocg("Hidden do not print", on=False)
+    midpoint = mm_to_pt(width_mm / 2)
+    page.draw_rect(
+        fitz.Rect(0, 0, midpoint, mm_to_pt(height_mm)),
+        color=None,
+        fill=(0.85, 0.10, 0.10),
+        oc=visible,
+    )
+    page.draw_rect(
+        fitz.Rect(midpoint, 0, mm_to_pt(width_mm), mm_to_pt(height_mm)),
+        color=None,
+        fill=(0.05, 0.15, 0.90),
+        oc=hidden,
+    )
+    doc.save(path)
+    doc.close()
+
+
 def render_pdf_page_rgb(path: Path, dpi=96):
     doc = fitz.open(path)
     try:
@@ -119,7 +141,7 @@ def pixel_diff_stats(a, b):
     total = 0
     max_abs = 0
     different = 0
-    for left, right in zip(adata, bdata):
+    for left, right in zip(adata, bdata, strict=True):
         delta = abs(left - right)
         total += delta
         max_abs = max(max_abs, delta)
@@ -139,7 +161,7 @@ def save_ppm_diff_artifact(name: str, a, b):
         return None
     FAILURE_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
     diff = bytearray()
-    for left, right in zip(adata, bdata):
+    for left, right in zip(adata, bdata, strict=True):
         diff.append(min(255, abs(left - right) * 8))
     out = FAILURE_ARTIFACT_DIR / f"{name}.ppm"
     out.write_bytes(f"P6\n{aw} {ah}\n255\n".encode("ascii") + bytes(diff))

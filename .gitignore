@@ -38,3 +38,7 @@ logs/*.log*
 !logs/
 !logs/.gitkeep
 !*.md
+
+# Local release binaries and abandoned planning drafts
+/release/
+/docs/project-os-drafts/

@@ -2,6 +2,7 @@
 import threading
 import queue
 import os
+import math
 import subprocess
 import sys
 import tempfile
@@ -45,12 +46,13 @@ from src.artboard_cutter_core.modes import (
 from src.artboard_cutter_core.output_io import build_output_paths, find_duplicate_paths, find_stale_panel_outputs
 from src.artboard_cutter_core.validation import validate_export_values
 from src.artboard_cutter_core.illustrator_integration import get_illustrator_artboard_names
-from src.artboard_cutter_core.jobs import default_recovery_job_path, load_job, save_job
-from src.artboard_cutter_core.preflight import estimate_export_job, format_bytes
+from src.artboard_cutter_core.jobs import default_recovery_job_path, load_job, save_job, startup_job_path
+from src.artboard_cutter_core.preflight import combined_disk_space_warning, estimate_export_job, format_bytes
 from src.artboard_cutter_core.pdf_io import force_page_boxes as core_force_page_boxes, open_pdf_robust as core_open_pdf_robust
 from src.artboard_cutter_core.profiles import (
     ArtworkProfile,
     create_artwork_profiles as core_create_artwork_profiles,
+    make_unique_output_names,
     sanitize_output_name,
     validate_output_name as core_validate_output_name,
 )
@@ -64,9 +66,11 @@ from src.artboard_cutter_core.units import (
     fmt_mm as core_fmt_mm,
     mm_to_pt as core_mm_to_pt,
     pt_to_mm as core_pt_to_mm,
+    preview_render_scale,
 )
 from src.artboard_cutter_core.vector_export import export_artboards_vector_uniform as core_export_vector
 from src.artboard_cutter_core.version import APP_VERSION
+from src.artboard_cutter_core.workflow import PendingExportJob, ProfileExportValues
 
 # --- TIFF / JPG helpers via Pillow (NO TiffImagePlugin usage) ---
 try:
@@ -365,7 +369,7 @@ def apply_theme(root: tk.Tk, style: ttk.Style, theme_name: str):
               foreground=[("disabled", C["text_secondary"]), ("active", "#ffffff"), ("pressed", "#ffffff")],
               bordercolor=[("active", C["primary_button_hover"]), ("pressed", C["primary_button_bg"])])
 
-    # Entries / Combobox
+    # Entries / Combobox / Spinbox
     style.configure(
         "TEntry",
         fieldbackground=C["input_bg"],
@@ -384,6 +388,21 @@ def apply_theme(root: tk.Tk, style: ttk.Style, theme_name: str):
         selectforeground=C["text_primary"],
         padding=(7, 5),
     )
+    style.configure(
+        "PanelCount.TSpinbox",
+        fieldbackground=C["input_bg"],
+        background=C["input_bg"],
+        foreground=C["text_primary"],
+        arrowcolor=C["text_primary"],
+        bordercolor=C["input_border"],
+        lightcolor=C["input_border"],
+        darkcolor=C["input_border"],
+        insertcolor=C["text_primary"],
+        selectbackground=C["selection_bg"],
+        selectforeground=C["selection_fg"],
+        padding=(5, 4),
+        relief="flat",
+    )
     style.map("TEntry",
               fieldbackground=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"])],
               foreground=[("disabled", C["text_secondary"])])
@@ -391,6 +410,33 @@ def apply_theme(root: tk.Tk, style: ttk.Style, theme_name: str):
               fieldbackground=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"]), ("active", C["input_bg"])],
               background=[("disabled", C["card_bg_raised"]), ("readonly", C["input_bg"]), ("active", C["input_bg"])],
               foreground=[("disabled", C["text_secondary"]), ("readonly", C["text_primary"]), ("active", C["text_primary"])])
+    style.map(
+        "PanelCount.TSpinbox",
+        fieldbackground=[
+            ("disabled", C["card_bg_raised"]),
+            ("readonly", C["input_bg"]),
+            ("focus", C["input_bg"]),
+            ("active", C["input_bg"]),
+        ],
+        background=[
+            ("disabled", C["card_bg_raised"]),
+            ("readonly", C["input_bg"]),
+            ("focus", C["input_bg"]),
+            ("active", C["button_hover"]),
+        ],
+        foreground=[
+            ("disabled", C["text_secondary"]),
+            ("readonly", C["text_primary"]),
+            ("focus", C["text_primary"]),
+            ("active", C["text_primary"]),
+        ],
+        arrowcolor=[
+            ("disabled", C["text_secondary"]),
+            ("active", C["accent"]),
+            ("pressed", C["selection_fg"]),
+        ],
+        bordercolor=[("focus", C["accent"]), ("active", C["border_strong"])],
+    )
 
     # Toggle controls. Explicit active/selected maps prevent native ttk from
     # painting radio/check labels with a bright platform highlight.
@@ -493,9 +539,13 @@ def _patch_text_colors(widget, C, root):
         _patch_text_colors(ch, C, root)
 
 
+class PreflightCancelled(Exception):
+    """Raised when the operator deliberately stops before export begins."""
+
+
 # ---------------------- GUI ----------------------
 class App(BaseTk):
-    def __init__(self):
+    def __init__(self, startup_job: Path | None = None):
         super().__init__()
         self.title("Artboard Cutter")
         icon_path = resource_path("assets/artboard_cutter.ico")
@@ -531,12 +581,36 @@ class App(BaseTk):
         self._close_after_export = False
         self._settings_enabled = False
         self._pending_import_paths = set()
+        self._import_generation = 0
         self._preview_request = None
         self._recovery_save_after_id = None
+        self._poll_after_id = None
+        self._recovery_offer_after_id = None
+        self._startup_job_after_id = None
+        self._startup_job_path = Path(startup_job) if startup_job is not None else None
         self._recovery_path = default_recovery_job_path()
         self._build_modern_ui()
-        self.after(50, self._poll_export_events)
-        self.after(400, self._offer_session_recovery)
+        self._poll_after_id = self.after(50, self._poll_export_events)
+        if self._startup_job_path is not None:
+            self._startup_job_after_id = self.after(100, self._load_startup_job)
+        else:
+            self._recovery_offer_after_id = self.after(400, self._offer_session_recovery)
+
+    def destroy(self):
+        for attribute in (
+            "_poll_after_id",
+            "_recovery_offer_after_id",
+            "_recovery_save_after_id",
+            "_startup_job_after_id",
+        ):
+            after_id = getattr(self, attribute, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except Exception:
+                    pass
+                setattr(self, attribute, None)
+        super().destroy()
 
     def _load_icons(self) -> dict[str, tk.PhotoImage]:
         icons: dict[str, tk.PhotoImage] = {}
@@ -617,7 +691,6 @@ class App(BaseTk):
             recent_files=recent_files,
             recent_output_dirs=recent_output_dirs,
             presets=self._settings.presets or {},
-            layout_templates=self._settings.layout_templates or {},
             theme=self.theme_var.get(),
             window_geometry=self.geometry(),
         )
@@ -653,18 +726,29 @@ class App(BaseTk):
                 self.log_print(f"[WARN] Could not save session recovery: {exc}")
 
     def _offer_session_recovery(self):
+        self._recovery_offer_after_id = None
         if self._profiles or not self._recovery_path.exists():
             return
         try:
             profiles = load_job(self._recovery_path)
-        except Exception:
-            self._recovery_path.unlink(missing_ok=True)
+        except Exception as exc:
+            try:
+                self._recovery_path.unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                if hasattr(self, "log"):
+                    self.log_print(f"[WARN] Could not discard invalid session recovery: {unlink_exc}")
+            if hasattr(self, "log"):
+                self.log_print(f"[WARN] Ignored invalid session recovery: {exc}")
             return
         if not messagebox.askyesno(
             "Recover previous session?",
             f"Artboard Cutter found {len(profiles)} queue item(s) from an interrupted session. Restore them?",
         ):
-            self._recovery_path.unlink(missing_ok=True)
+            try:
+                self._recovery_path.unlink(missing_ok=True)
+            except OSError as exc:
+                if hasattr(self, "log"):
+                    self.log_print(f"[WARN] Could not discard session recovery: {exc}")
             return
         grouped = {}
         for profile in profiles:
@@ -680,6 +764,14 @@ class App(BaseTk):
             self._insert_imported_profiles(source_path, source_profiles, None, defaults)
         self.status_var.set("Recovered the previous queue. Use Retry Failed / Resume for interrupted jobs.")
 
+    def _close_cleanly(self):
+        self._save_settings()
+        try:
+            self._recovery_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self.destroy()
+
     def _on_close(self):
         if self._export_running:
             if messagebox.askyesno(
@@ -689,12 +781,7 @@ class App(BaseTk):
                 self._close_after_export = True
                 self.on_cancel_export()
             return
-        self._save_settings()
-        try:
-            self._recovery_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        self.destroy()
+        self._close_cleanly()
 
     def _build_modern_ui(self):
         self.rowconfigure(0, weight=0)
@@ -768,7 +855,15 @@ class App(BaseTk):
         self.panel_count_var = tk.StringVar(value="1")
         self.set_panel_count_button = self._button(preview_card_header, "Set", self.on_set_panel_count, style="Tool.TButton", width=4)
         self.set_panel_count_button.pack(side="right", padx=(4, 0))
-        self.panel_count_spin = ttk.Spinbox(preview_card_header, from_=1, to=999, textvariable=self.panel_count_var, width=4)
+        self.panel_count_spin = ttk.Spinbox(
+            preview_card_header,
+            from_=1,
+            to=999,
+            textvariable=self.panel_count_var,
+            width=5,
+            justify="center",
+            style="PanelCount.TSpinbox",
+        )
         self.panel_count_spin.pack(side="right", padx=(8, 0))
         ttk.Label(preview_card_header, text="Panels", style="ToolbarMuted.TLabel").pack(side="right", padx=(8, 0))
         self._button(preview_card_header, "Fit", self._preview_fit, icon="fit", style="Tool.TButton", width=6).pack(side="right", padx=(4, 0))
@@ -935,20 +1030,6 @@ class App(BaseTk):
         self.widths_entry = ttk.Entry(row, textvariable=self.widths_var, width=24)
         self.widths_entry.pack(side="left", fill="x", expand=True)
         self._settings_widgets.append(self.widths_entry)
-
-        row = make_param_row("Layout Template")
-        self.layout_template_var = tk.StringVar(value="")
-        self.layout_template_combo = ttk.Combobox(
-            row,
-            textvariable=self.layout_template_var,
-            values=sorted((self._settings.layout_templates or {}).keys(), key=str.casefold),
-            state="readonly",
-            width=14,
-        )
-        self.layout_template_combo.pack(side="left", fill="x", expand=True)
-        self._button(row, "Apply", self.on_apply_layout_template).pack(side="left", padx=(6, 0))
-        self._button(row, "Save", self.on_save_layout_template).pack(side="left", padx=(6, 0))
-        self._button(row, "Delete", self.on_delete_layout_template, style="Danger.TButton").pack(side="left", padx=(6, 0))
 
         row = make_param_row("Height (mm)")
         self.height_var = tk.StringVar(value="")
@@ -1174,7 +1255,7 @@ class App(BaseTk):
             "About Artboard Cutter",
             f"Artboard Cutter {APP_VERSION}\n\n"
             "Production artwork panel export with streamed TIFF, PDF Preserve, ICC color management, "
-            "staged verification, job recovery, and reusable presets/layouts.",
+            "staged verification, job recovery, and reusable export presets.",
         )
 
     # ---------- Theme ----------
@@ -1294,69 +1375,6 @@ class App(BaseTk):
         self._save_settings()
         self.status_var.set(f"Deleted preset: {name}")
 
-    def _refresh_layout_template_choices(self):
-        names = sorted((self._settings.layout_templates or {}).keys(), key=str.casefold)
-        self.layout_template_combo.configure(values=names)
-        if self.layout_template_var.get() not in names:
-            self.layout_template_var.set("")
-
-    def on_save_layout_template(self):
-        if not self._active_iid:
-            return
-        try:
-            widths = parse_widths_list(self.widths_var.get())
-            total = sum(widths)
-            if total <= 0:
-                raise ValueError("Panel widths must be positive.")
-        except Exception as exc:
-            messagebox.showerror("Cannot save layout", str(exc))
-            return
-        name = simpledialog.askstring("Save layout template", "Layout name:", parent=self)
-        if not name or not name.strip():
-            return
-        name = name.strip()
-        templates = dict(self._settings.layout_templates or {})
-        if name in templates and not messagebox.askyesno("Replace layout?", f"Replace the existing layout '{name}'?"):
-            return
-        templates[name] = {"ratios": [width / total for width in widths]}
-        self._settings.layout_templates = templates
-        self._refresh_layout_template_choices()
-        self.layout_template_var.set(name)
-        self._save_settings()
-        self.status_var.set(f"Saved proportional layout: {name}")
-
-    def on_apply_layout_template(self):
-        template = (self._settings.layout_templates or {}).get(self.layout_template_var.get())
-        if not template or not self._active_iid:
-            return
-        try:
-            current_widths = parse_widths_list(self.widths_var.get())
-            total = sum(current_widths)
-            ratios = [float(value) for value in template.get("ratios", [])]
-            ratio_total = sum(ratios)
-            if total <= 0 or ratio_total <= 0:
-                raise ValueError("The layout template is invalid.")
-            widths = [total * ratio / ratio_total for ratio in ratios]
-            widths[-1] = total - sum(widths[:-1])
-        except Exception as exc:
-            messagebox.showerror("Cannot apply layout", str(exc))
-            return
-        self.widths_var.set(" ".join(fmt_mm(width) for width in widths))
-        self.status_var.set(f"Applied layout without changing the overall artwork width: {self.layout_template_var.get()}")
-
-    def on_delete_layout_template(self):
-        name = self.layout_template_var.get()
-        if not name or name not in (self._settings.layout_templates or {}):
-            return
-        if not messagebox.askyesno("Delete layout?", f"Delete the layout '{name}'?"):
-            return
-        templates = dict(self._settings.layout_templates or {})
-        templates.pop(name, None)
-        self._settings.layout_templates = templates
-        self._refresh_layout_template_choices()
-        self._save_settings()
-        self.status_var.set(f"Deleted layout: {name}")
-
     # ---------- Files tree helpers ----------
     def _profile_iids(self):
         return list(self._profiles.keys())
@@ -1375,17 +1393,23 @@ class App(BaseTk):
             return [iid]
         return [child for child in self.files_tree.get_children(iid) if child in self._profiles]
 
+    @staticmethod
+    def _file_path_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
     def _add_file_item(self, path: str):
         path = str(Path(path).expanduser().resolve())
-        if path in self._file_groups:
-            iid = self._file_groups[path]
+        path_key = self._file_path_key(path)
+        if path_key in self._file_groups:
+            iid = self._file_groups[path_key]
             self.files_tree.selection_set(iid)
             self.files_tree.focus(iid)
             self.files_tree.see(iid)
             return iid
-        if path in self._pending_import_paths:
+        if path_key in self._pending_import_paths:
             return None
-        self._pending_import_paths.add(path)
+        self._pending_import_paths.add(path_key)
+        import_generation = self._import_generation
         defaults = {
             "bleed_mm": self.bleed_var.get(),
             "overlap_mm": self.overlap_var.get(),
@@ -1407,13 +1431,24 @@ class App(BaseTk):
             except Exception as exc:
                 profiles = []
                 error = str(exc)
-            self._export_events.put(("import_ready", path, profiles, error, defaults))
+            self._export_events.put(("import_ready", import_generation, path, profiles, error, defaults))
 
         threading.Thread(target=work, daemon=True).start()
         return None
 
-    def _insert_imported_profiles(self, path: str, profiles: list[ArtworkProfile], error: str | None, defaults: dict):
-        self._pending_import_paths.discard(path)
+    def _insert_imported_profiles(
+        self,
+        path: str,
+        profiles: list[ArtworkProfile],
+        error: str | None,
+        defaults: dict,
+        *,
+        import_generation: int | None = None,
+    ):
+        if import_generation is not None and import_generation != self._import_generation:
+            return None
+        path_key = self._file_path_key(path)
+        self._pending_import_paths.discard(path_key)
         if error:
             self.log_print(f"[WARN] Cannot probe {path}: {error}")
             profiles = [
@@ -1436,7 +1471,7 @@ class App(BaseTk):
                 values=(self._checkbox_text(False), "", "", f"0/{len(profiles)} selected", "Get Names", path),
                 open=True,
             )
-            self._file_groups[path] = parent
+            self._file_groups[path_key] = parent
         last_iid = None
         for profile in profiles:
             iid = self.files_tree.insert(parent, "end")
@@ -1444,7 +1479,7 @@ class App(BaseTk):
             self._update_profile_row(iid)
             last_iid = iid
         if len(profiles) == 1 and last_iid:
-            self._file_groups[path] = last_iid
+            self._file_groups[path_key] = last_iid
         if last_iid:
             first_new = self.files_tree.get_children(parent)[0] if parent else last_iid
             self.files_tree.selection_set(first_new)
@@ -1507,6 +1542,7 @@ class App(BaseTk):
         parent = self.files_tree.parent(iid)
         if parent:
             self._update_group_row(parent)
+        self._schedule_recovery_save()
 
     def _toggle_group(self, iid):
         children = self._child_profile_iids(iid)
@@ -1517,6 +1553,7 @@ class App(BaseTk):
             self._profiles[child].selected = new_state
             self._update_profile_row(child)
         self._update_group_row(iid)
+        self._schedule_recovery_save()
 
     def on_tree_click(self, event):
         region = self.files_tree.identify("region", event.x, event.y)
@@ -1603,16 +1640,16 @@ class App(BaseTk):
                 )
                 self.status_var.set("Could not read Illustrator artboard names.")
                 return
-            seen = {}
             current_children = self._child_profile_iids(group_iid)
+            sanitized_names = []
             for idx, child in enumerate(current_children):
                 profile = self._profiles[child]
                 fallback = f"{source_path.stem}{profile.source_page_index + 1}" if profile.source_page_count > 1 else source_path.stem
                 raw_name = names[idx] if idx < len(names) else fallback
-                name = sanitize_output_name(raw_name, fallback)
-                count = seen.get(name, 0) + 1
-                seen[name] = count
-                profile.output_name = name if count == 1 else f"{name}{count}"
+                sanitized_names.append(sanitize_output_name(raw_name, fallback))
+            for child, name in zip(current_children, make_unique_output_names(sanitized_names), strict=True):
+                profile = self._profiles[child]
+                profile.output_name = name
                 self._update_profile_row(child)
             self._update_group_row(group_iid)
             self.status_var.set(f"Loaded Illustrator artboard names for {source_path.name}.")
@@ -1629,6 +1666,7 @@ class App(BaseTk):
             self._save_selected_profile_settings()
             self._active_iid = None
             self._set_settings_enabled(False)
+            self._preview_request = None
             self._bg_preview_im = None
             self._bg_preview_tk = None
             self._update_preview()
@@ -1656,6 +1694,7 @@ class App(BaseTk):
                 parent = self.files_tree.parent(child)
                 if parent:
                     self._update_group_row(parent)
+        self._schedule_recovery_save()
 
     def on_uncheck_selected(self):
         for iid in self.files_tree.selection():
@@ -1665,6 +1704,7 @@ class App(BaseTk):
                 parent = self.files_tree.parent(child)
                 if parent:
                     self._update_group_row(parent)
+        self._schedule_recovery_save()
 
     def on_check_all(self):
         for iid in self._profile_iids():
@@ -1729,17 +1769,21 @@ class App(BaseTk):
             return
         for iid in list(self.files_tree.selection()):
             self._remove_iid(iid)
+        self._schedule_recovery_save()
 
     def on_clear(self):
         if self._export_running:
             messagebox.showwarning("Export in progress", "Cancel or finish the export before clearing the queue.")
             return
+        self._import_generation += 1
+        self._pending_import_paths.clear()
         for iid in list(self.files_tree.get_children("")):
             self._remove_iid(iid, select_next=False)
         self._active_iid = None
         self._profiles.clear()
         self._file_groups.clear()
         self._set_settings_enabled(False)
+        self._preview_request = None
         self._bg_preview_im = None
         self._bg_preview_tk = None
         self._update_queue_empty_state()
@@ -1757,8 +1801,8 @@ class App(BaseTk):
             return
         path = filedialog.asksaveasfilename(
             title="Save Artboard Cutter job",
-            defaultextension=".artboard-job.json",
-            filetypes=[("Artboard Cutter jobs", "*.artboard-job.json"), ("JSON files", "*.json")],
+            defaultextension=".artboard-job",
+            filetypes=[("Artboard Cutter jobs", "*.artboard-job"), ("All files", "*.*")],
         )
         if not path:
             return
@@ -1775,17 +1819,40 @@ class App(BaseTk):
             return
         path = filedialog.askopenfilename(
             title="Load Artboard Cutter job",
-            filetypes=[("Artboard Cutter jobs", "*.artboard-job.json"), ("JSON files", "*.json")],
+            filetypes=[
+                ("Artboard Cutter jobs", "*.artboard-job *.artboard-job.json"),
+                ("Legacy job files", "*.artboard-job.json"),
+                ("All files", "*.*"),
+            ],
         )
         if not path:
             return
+        self.load_job_path(Path(path))
+
+    def _load_startup_job(self):
+        self._startup_job_after_id = None
+        path = self._startup_job_path
+        self._startup_job_path = None
+        if path is not None:
+            self.load_job_path(path, confirm_replace=False)
+
+    def load_job_path(self, path: Path, *, confirm_replace: bool = True) -> bool:
+        """Load a job selected in the GUI or passed by Windows Explorer."""
+        if self._export_running:
+            messagebox.showwarning("Export in progress", "Finish or cancel the export before loading a job.")
+            return False
+        path = Path(path)
         try:
-            profiles = load_job(Path(path))
+            profiles = load_job(path)
         except Exception as exc:
             messagebox.showerror("Could not load job", str(exc))
-            return
-        if self._profiles and not messagebox.askyesno("Replace current queue?", "Replace the current artwork queue with this job?"):
-            return
+            return False
+        if (
+            confirm_replace
+            and self._profiles
+            and not messagebox.askyesno("Replace current queue?", "Replace the current artwork queue with this job?")
+        ):
+            return False
         self.on_clear()
         grouped = {}
         for profile in profiles:
@@ -1807,36 +1874,43 @@ class App(BaseTk):
         }
         for source_path, source_profiles in grouped.items():
             self._insert_imported_profiles(source_path, source_profiles, None, defaults)
-        self.status_var.set(f"Loaded job: {Path(path).name}")
+        self.status_var.set(f"Loaded job: {path.name}")
+        return True
 
-    def _remove_iid(self, iid, select_next=True):
+    def _remove_iid(self, iid, select_next=True, remove_empty_parent=True):
+        if not self.files_tree.exists(iid):
+            return
         if iid not in self._profiles:
-            for child in list(self.files_tree.get_children(iid)):
-                self._remove_iid(child, select_next=False)
             path = self.files_tree.set(iid, "path")
+            for child in list(self.files_tree.get_children(iid)):
+                self._remove_iid(child, select_next=False, remove_empty_parent=False)
             self._file_groups.pop(path, None)
+            self._file_groups.pop(self._file_path_key(path), None)
+            try:
+                if self.files_tree.exists(iid):
+                    self.files_tree.delete(iid)
+            except Exception:
+                pass
+        else:
+            if iid == self._active_iid:
+                self._active_iid = None
+            profile = self._profiles.pop(iid, None)
+            parent = self.files_tree.parent(iid)
             try:
                 self.files_tree.delete(iid)
             except Exception:
                 pass
-            return
-        if iid == self._active_iid:
-            self._active_iid = None
-        profile = self._profiles.pop(iid, None)
-        parent = self.files_tree.parent(iid)
-        try:
-            self.files_tree.delete(iid)
-        except Exception:
-            pass
-        if parent:
-            if self.files_tree.get_children(parent):
-                self._update_group_row(parent)
-            else:
-                path = self.files_tree.set(parent, "path")
-                self._file_groups.pop(path, None)
-                self.files_tree.delete(parent)
-        elif profile:
-            self._file_groups.pop(profile.file_path, None)
+            if parent and self.files_tree.exists(parent):
+                if self.files_tree.get_children(parent):
+                    self._update_group_row(parent)
+                elif remove_empty_parent:
+                    path = self.files_tree.set(parent, "path")
+                    self._file_groups.pop(path, None)
+                    self._file_groups.pop(self._file_path_key(path), None)
+                    self.files_tree.delete(parent)
+            elif profile:
+                self._file_groups.pop(profile.file_path, None)
+                self._file_groups.pop(self._file_path_key(profile.file_path), None)
         if not select_next:
             self._update_queue_empty_state()
             return
@@ -1847,10 +1921,12 @@ class App(BaseTk):
             self.files_tree.focus(next_iid)
         else:
             self._set_settings_enabled(False)
+            self._preview_request = None
             self._bg_preview_im = None
             self._bg_preview_tk = None
             self._update_preview()
         self._update_queue_empty_state()
+        self._schedule_recovery_save()
 
     def on_browse_outdir(self):
         initial = Path(self.outdir_var.get()).expanduser()
@@ -1978,16 +2054,19 @@ class App(BaseTk):
         self._bg_preview_tk = None
 
         def work():
+            if request != self._preview_request:
+                return
             doc = None
             try:
                 with PDF_OPERATION_LOCK:
+                    if request != self._preview_request:
+                        return
                     doc = open_pdf_robust(p)
                     page = doc.load_page(page_index)
                     rect = page.rect
                     if PIL_AVAILABLE:
-                        max_px = 1600.0
                         max_dim_pt = max(float(rect.width), float(rect.height)) or 1.0
-                        scale = max(0.2, min(2.0, max_px / max_dim_pt))
+                        scale = preview_render_scale(max_dim_pt)
                         pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                         image = pixmap_to_pil(pix)
                     else:
@@ -2239,6 +2318,22 @@ class App(BaseTk):
             self._preview_edge_targets = []
             return
 
+        if (
+            not math.isfinite(bleed)
+            or not math.isfinite(overlap)
+            or not math.isfinite(height)
+            or bleed < 0
+            or overlap < 0
+            or height <= 0
+            or any(not math.isfinite(width) or width <= 0 for width in widths)
+        ):
+            self.preview_var.set("Invalid dimensions: use positive finite panel widths and height; bleed/overlap must be finite and non-negative.")
+            if hasattr(self, "preview_canvas"):
+                self._render_preview_empty("Invalid artwork dimensions", "Correct the highlighted size values to restore the preview.")
+            self._preview_view = None
+            self._preview_edge_targets = []
+            return
+
         bleed_eff = max(0.0, bleed)
         overlap_mode = normalize_overlap_mode(self.overlap_mode_var.get())
         if len(widths) > 1 and overlap >= min(widths):
@@ -2403,7 +2498,7 @@ class App(BaseTk):
             cv.create_rectangle(xx(0), yy(max(0.0, page_h_mm - bleed_mm)), xx(total_w_mm), yy(page_h_mm), fill=bleed_fill, stipple="gray25", outline="")
 
         # Shared overlap zones
-        for left_panel, right_panel in zip(panel_layout, panel_layout[1:]):
+        for left_panel, right_panel in zip(panel_layout, panel_layout[1:], strict=False):
             overlap_left = right_panel["outer_left"]
             overlap_right = left_panel["outer_right"]
             if overlap_right > overlap_left:
@@ -2459,11 +2554,11 @@ class App(BaseTk):
         dpi_txt = profile.dpi.strip()
         try:
             dpi = int(dpi_txt) if dpi_txt else None
-        except ValueError:
+        except ValueError as exc:
             if preserve_vectors:
                 dpi = None
             else:
-                raise ValueError("DPI must be a whole number.")
+                raise ValueError("DPI must be a whole number.") from exc
         values = validate_export_values(
             output_name=profile.file_name,
             bleed_mm=bleed_mm,
@@ -2479,19 +2574,19 @@ class App(BaseTk):
         if not preserve_vectors and profile.icc_mode != "Off":
             if not profile.icc_profile_path.strip() or not Path(profile.icc_profile_path).expanduser().is_file():
                 raise ValueError("Choose a valid output ICC profile, or set ICC Handling to Off.")
-        return (
-            values.bleed_mm,
-            values.widths_mm,
-            values.height_mm,
-            values.overlap_mm,
-            values.overlap_mode,
-            values.dpi,
-            values.export_format,
-            values.preserve_vectors,
-            values.color_mode,
-            profile.icc_mode,
-            profile.icc_profile_path,
-            profile.rendering_intent,
+        return ProfileExportValues(
+            bleed_mm=values.bleed_mm,
+            widths_mm=values.widths_mm,
+            height_mm=values.height_mm,
+            overlap_mm=values.overlap_mm,
+            overlap_mode=values.overlap_mode,
+            dpi=values.dpi,
+            export_format=values.export_format,
+            preserve_vectors=values.preserve_vectors,
+            color_mode=values.color_mode,
+            icc_mode=profile.icc_mode,
+            icc_profile_path=profile.icc_profile_path,
+            rendering_intent=profile.rendering_intent,
         )
 
     def _set_export_busy(self, busy: bool):
@@ -2527,6 +2622,10 @@ class App(BaseTk):
         self.status_var.set(f"Ready to retry {len(retry_iids)} failed/interrupted job(s).")
         self.on_start()
 
+    def _mark_jobs_interrupted(self, export_jobs, start_index: int):
+        for pending in export_jobs[start_index:]:
+            self._export_events.put(("job_state", pending.iid, "Interrupted", "pending"))
+
     def _preflight_output_plan(self, outdir: Path, export_jobs):
         if not str(self.outdir_var.get()).strip():
             raise ValueError("Choose an output folder before exporting.")
@@ -2540,23 +2639,32 @@ class App(BaseTk):
             raise ValueError(f"Output folder is not writable: {outdir}\n{exc}") from exc
 
         estimates = []
-        for _iid, _source_path, output_name, _page_index, values in export_jobs:
+        for job in export_jobs:
+            values = job.values
+            try:
+                source_size_bytes = job.source_path.stat().st_size
+            except OSError:
+                source_size_bytes = None
             estimate = estimate_export_job(
-                widths_mm=values[1],
-                height_mm=values[2],
-                bleed_mm=values[0],
-                overlap_mm=values[3],
-                overlap_mode=values[4],
-                dpi=values[5],
-                color_mode=values[8],
-                export_format=values[6],
-                preserve_vectors=values[7],
+                widths_mm=values.widths_mm,
+                height_mm=values.height_mm,
+                bleed_mm=values.bleed_mm,
+                overlap_mm=values.overlap_mm,
+                overlap_mode=values.overlap_mode,
+                dpi=values.dpi,
+                color_mode=values.color_mode,
+                export_format=values.export_format,
+                preserve_vectors=values.preserve_vectors,
                 output_root=outdir,
+                source_size_bytes=source_size_bytes,
             )
-            estimates.append((output_name, estimate))
+            estimates.append((job.output_name, estimate))
         total_panels = sum(estimate.panel_count for _name, estimate in estimates)
         total_disk = sum(estimate.estimated_disk_bytes for _name, estimate in estimates)
         warnings = [f"{name}: {warning}" for name, estimate in estimates for warning in estimate.warnings]
+        combined_warning = combined_disk_space_warning([estimate for _name, estimate in estimates])
+        if combined_warning:
+            warnings.append(combined_warning)
         details = [
             f"Jobs: {len(estimates)}   Panels: {total_panels}",
             f"Estimated output space: {format_bytes(total_disk)}",
@@ -2567,22 +2675,20 @@ class App(BaseTk):
             "Export preflight",
             "\n".join(details) + "\n\nContinue with export?",
         ):
-            raise ValueError("Export cancelled during preflight.")
+            raise PreflightCancelled("Export cancelled during preflight.")
         for name, estimate in estimates:
             self.log_print(f"[PREFLIGHT] {name}: " + "; ".join(estimate.summary_lines()))
 
         planned_paths = []
         stale_paths = []
-        for _iid, _source_path, output_name, _page_index, values in export_jobs:
-            widths_mm = values[1]
-            export_fmt = values[6]
-            preserve_vectors = values[7]
+        for job in export_jobs:
+            values = job.values
             paths = build_output_paths(
                 outdir,
-                output_name,
-                len(widths_mm),
-                export_fmt,
-                preserve_vectors=preserve_vectors,
+                job.output_name,
+                len(values.widths_mm),
+                values.export_format,
+                preserve_vectors=values.preserve_vectors,
             )
             planned_paths.extend(paths)
             stale_paths.extend(find_stale_panel_outputs(paths))
@@ -2607,10 +2713,11 @@ class App(BaseTk):
             f"{preview}\n\nReplace the planned files and remove stale extra panels only after each job succeeds?",
         )
         if not approved:
-            raise ValueError("Export cancelled because output files already exist.")
+            raise PreflightCancelled("Export cancelled because output files already exist.")
         return True, True
 
     def _poll_export_events(self):
+        self._poll_after_id = None
         while True:
             try:
                 event = self._export_events.get_nowait()
@@ -2620,10 +2727,19 @@ class App(BaseTk):
             if kind == "log":
                 self.log_print(event[1])
             elif kind == "call":
-                event[1]()
+                try:
+                    event[1]()
+                except Exception as exc:
+                    self.log_print(f"[WARN] Background UI action failed: {exc}")
             elif kind == "import_ready":
-                _, path, profiles, error, defaults = event
-                self._insert_imported_profiles(path, profiles, error, defaults)
+                _, import_generation, path, profiles, error, defaults = event
+                self._insert_imported_profiles(
+                    path,
+                    profiles,
+                    error,
+                    defaults,
+                    import_generation=import_generation,
+                )
             elif kind == "preview_ready":
                 _, request, image, error = event
                 if request == self._preview_request:
@@ -2656,10 +2772,9 @@ class App(BaseTk):
                 self.log_print(message)
                 self.status_var.set(message)
                 if self._close_after_export:
-                    self._save_settings()
-                    self.destroy()
+                    self._close_cleanly()
                     return
-        self.after(50, self._poll_export_events)
+        self._poll_after_id = self.after(50, self._poll_export_events)
 
     def on_start(self):
         if self._export_running:
@@ -2678,13 +2793,19 @@ class App(BaseTk):
             for iid, profile in checked_items:
                 values = self._validate_profile_for_export(profile)
                 export_jobs.append(
-                    (iid, Path(profile.file_path), profile.file_name, profile.source_page_index, values)
+                    PendingExportJob(
+                        iid=iid,
+                        source_path=Path(profile.file_path),
+                        output_name=profile.file_name,
+                        page_index=profile.source_page_index,
+                        values=values,
+                    )
                 )
                 profile.validation_state = "valid"
                 self._update_profile_row(iid)
                 if profile.original_width_mm and profile.original_height_mm:
-                    scale_x = sum(values[1]) / profile.original_width_mm
-                    scale_y = values[2] / profile.original_height_mm
+                    scale_x = sum(values.widths_mm) / profile.original_width_mm
+                    scale_y = values.height_mm / profile.original_height_mm
                     if scale_y and abs((scale_x / scale_y) - 1.0) > 0.01:
                         distortion_warnings.append(
                             f"{profile.file_name}: X {scale_x * 100:.1f}% / Y {scale_y * 100:.1f}%"
@@ -2710,6 +2831,9 @@ class App(BaseTk):
         outdir = Path(self.outdir_var.get()).expanduser()
         try:
             overwrite, cleanup_stale = self._preflight_output_plan(outdir, export_jobs)
+        except PreflightCancelled as exc:
+            self.status_var.set(str(exc))
+            return
         except Exception as exc:
             self.status_var.set(str(exc))
             messagebox.showerror("Cannot start export", str(exc))
@@ -2727,60 +2851,50 @@ class App(BaseTk):
             count = 0
             errors = 0
             cancelled = False
-            for i, (iid, source_path, output_name, page_index, values) in enumerate(export_jobs, 1):
+            for job_index, job in enumerate(export_jobs):
+                i = job_index + 1
                 if self._export_cancel_event.is_set():
                     cancelled = True
+                    self._mark_jobs_interrupted(export_jobs, job_index)
                     break
-                (
-                    bleed_mm,
-                    widths_mm,
-                    height_mm,
-                    overlap_mm,
-                    overlap_mode,
-                    dpi,
-                    export_fmt,
-                    preserve_vectors,
-                    color_mode,
-                    icc_mode,
-                    icc_profile_path,
-                    rendering_intent,
-                ) = values
+                values = job.values
                 try:
-                    self._export_events.put(("job_state", iid, "Processing", "valid"))
-                    self._export_events.put(("status", f"Processing {output_name} ({i}/{len(export_jobs)})"))
+                    self._export_events.put(("job_state", job.iid, "Processing", "valid"))
+                    self._export_events.put(("status", f"Processing {job.output_name} ({i}/{len(export_jobs)})"))
                     process_file(
-                        source_path,
-                        bleed_mm=bleed_mm,
-                        widths_mm=widths_mm,
-                        height_mm=height_mm,
-                        overlap_mm=overlap_mm,
-                        overlap_mode=overlap_mode,
-                        dpi=dpi,
+                        job.source_path,
+                        bleed_mm=values.bleed_mm,
+                        widths_mm=values.widths_mm,
+                        height_mm=values.height_mm,
+                        overlap_mm=values.overlap_mm,
+                        overlap_mode=values.overlap_mode,
+                        dpi=values.dpi,
                         output_root=outdir,
-                        export_fmt=export_fmt,
-                        preserve_vectors=preserve_vectors,
+                        export_fmt=values.export_format,
+                        preserve_vectors=values.preserve_vectors,
                         vector_fit_mode="stretch",
-                        page_index=page_index,
-                        output_name=output_name,
+                        page_index=job.page_index,
+                        output_name=job.output_name,
                         overwrite=overwrite,
                         cleanup_stale=cleanup_stale,
                         cancel_check=self._export_cancel_event.is_set,
-                        color_mode=color_mode,
-                        icc_mode=icc_mode,
-                        icc_profile_path=icc_profile_path,
-                        rendering_intent=rendering_intent,
+                        color_mode=values.color_mode,
+                        icc_mode=values.icc_mode,
+                        icc_profile_path=values.icc_profile_path,
+                        rendering_intent=values.rendering_intent,
                         log_cb=lambda message: self._export_events.put(("log", message)),
                     )
-                    self._export_events.put(("job_state", iid, "Done", "valid"))
+                    self._export_events.put(("job_state", job.iid, "Done", "valid"))
                     count += 1
                 except ExportCancelled:
-                    self._export_events.put(("job_state", iid, "Cancelled", "pending"))
+                    self._export_events.put(("job_state", job.iid, "Cancelled", "pending"))
+                    self._mark_jobs_interrupted(export_jobs, job_index + 1)
                     cancelled = True
                     break
                 except Exception as e:
                     errors += 1
-                    self._export_events.put(("job_state", iid, "Error", "error"))
-                    self._export_events.put(("log", f"[ERROR] {source_path}: {e}"))
+                    self._export_events.put(("job_state", job.iid, "Error", "error"))
+                    self._export_events.put(("log", f"[ERROR] {job.source_path}: {e}"))
                 finally:
                     self._export_events.put(("progress", i))
             self._export_events.put(("cancelled" if cancelled else "done", count, errors, outdir))
@@ -2789,7 +2903,13 @@ class App(BaseTk):
         self._export_thread.start()
 
 def run_packaged_self_test() -> None:
-    """Exercise the lazy-loaded TIFF codec path used by the one-file release build."""
+    """Exercise the packaged Tk/DnD runtime and lazy-loaded TIFF codec path."""
+    root = BaseTk()
+    try:
+        root.withdraw()
+        root.update_idletasks()
+    finally:
+        root.destroy()
     if not PIL_AVAILABLE:
         raise RuntimeError("Pillow is unavailable in the packaged application.")
     with tempfile.TemporaryDirectory(prefix="artboard-cutter-self-test-") as td:
@@ -2826,7 +2946,7 @@ def main():
             Path("packaged-self-test-error.log").write_text(traceback.format_exc(), encoding="utf-8")
             os._exit(1)
         os._exit(0)
-    app = App()
+    app = App(startup_job=startup_job_path(sys.argv[1:]))
     app.mainloop()
 
 

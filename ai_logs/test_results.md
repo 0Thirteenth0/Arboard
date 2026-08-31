@@ -4,8 +4,25 @@ Track manual and automated test results here.
 
 ## 2026-08-09 - Production hardening coverage
 
-- Added tests for streamed TIFF ICC embedding, raster-PDF output intents, blank-output verification, BigTIFF selection, large-job preflight, and layout-template normalization.
-- Final suite, executable build, and packaged launch results are recorded in the development task handoff.
+- Added tests for streamed TIFF ICC embedding, raster-PDF output intents, blank-output verification, BigTIFF selection, and large-job preflight.
+
+## 2026-08-11 - Layout Template removal
+
+- Removed the obsolete layout-template normalization test.
+- Added legacy-settings coverage confirming old `layout_templates` data is ignored without preventing settings from loading.
+- Full restricted suite passed: 73 tests, 5 guarded Tk/screenshot skips.
+- Real Windows Tk checks passed for launch, Layout Template absence, themed Panels spinbox rendering, and high-DPI scaling.
+- PyInstaller produced `dist/layout-removal/ArtboardCutter.exe`; its packaged TIFF self-test exited successfully.
+- The standard `dist/ArtboardCutter.exe` was not replaced because existing app processes were still using it.
+
+## 2026-08-11 - Full post-audit reliability validation
+
+- Complete real Windows host suite passed: 86 tests, 0 failures, 0 skips.
+- Confirmed the former grouped-parent removal crash is covered by a real Tk regression.
+- Added coverage for interrupted remaining jobs, clean recovery removal, finite numeric inputs, strict ICC presence, PDF Preserve blank detection, PDF Preserve size estimates, combined free-space warnings, preview pixel bounds, job-file types/page bounds, and generated version metadata.
+- Rebuilt the standard `dist/ArtboardCutter.exe` successfully.
+- Packaged TIFF self-test exited 0.
+- Windows executable FileVersion and ProductVersion both report 1.2.0.
 
 ## 2026-05-19 - Baseline checks
 
@@ -430,3 +447,48 @@ Notes:
 - Full Windows suite passed: 67 tests, 0 failures, 0 skips.
 - Rebuilt and smoke-launched `dist/ArtboardCutter.exe` successfully.
 - `git diff --check` passed with line-ending notices only.
+
+## 2026-08-11 - Comprehensive diagnostic baseline
+
+Commands/checks:
+
+- Full real-Windows `unittest` discovery, including live Tk and threaded GUI export.
+- Branch coverage across GUI and core modules.
+- `compileall`, `pip check`, Ruff fatal/bugbear checks, and `git diff --check`.
+- 5,000 deterministic randomized layout/resize invariant cases.
+- Multi-panel raster-source TIFF content verification and GUI-driven TIFF export.
+
+Results:
+
+- 114 tests passed, 0 failures, 0 skips.
+- Core statement coverage: 83.8%; core branch coverage: 70.2%.
+- GUI statement coverage: approximately 61.5%; GUI branch coverage: approximately 36.8% (the packaged-only self-test gate is measured separately).
+- No syntax errors, broken dependencies, fatal static-analysis findings, or whitespace errors.
+- Remaining uncovered paths are primarily platform/error fallbacks, dialogs, and real Adobe Illustrator COM behavior; they remain subject to manual integration acceptance.
+- Final `dist/ArtboardCutter.exe` is 56,576,840 bytes with FileVersion/ProductVersion 1.2.0.
+- PyInstaller no longer reports `tkinter` or Artboard Cutter core modules as missing.
+- Packaged Tk/TkDND/TIFF self-test passed with exit code 0.
+
+## 2026-08-26 - Layer visibility and Explorer job launch validation
+
+- Synthetic PDF Preserve regression confirmed a default-hidden OCG stays hidden in both output metadata and rendered pixels.
+- The supplied `BookingsCloud_VRMA26_A_2693x3416.ai` integration check passed: output preserved `backwall` as visible and both `3D Logo (DO NOT PRINT)` and `bolt + tv + cabinet + cloud` as hidden.
+- GUI startup regression loaded a `.artboard-job` whose filename contained spaces through the same delayed path used by Windows Explorer.
+- Installer regression confirmed the dedicated `.artboard-job` association and quoted `%1` open command, with no generic `.json` association.
+- Full Windows suite passed: 118 tests, 0 failures, 0 skips.
+- `compileall`, `pip check`, Ruff fatal/bugbear checks, and `git diff --check` passed.
+- Rebuilt `dist/ArtboardCutter.exe`: 57,633,319 bytes, FileVersion/ProductVersion 1.2.1, SHA-256 `01B3B3A648C4C5F952CD3EE968AA5C144E8CECC17FCB6D8E35282A6011E4F5E9`.
+- Packaged Tk/TkDND/TIFF self-test passed with exit code 0; the PyInstaller warning report contains no missing Tk or Artboard Cutter core modules.
+- The workstation initially lacked Inno Setup. Inno Setup 6.7.3 was installed for the current user, then the installer compiled successfully as `release/ArtboardCutter-1.2.1-Setup.exe`.
+- Final rebuilt standalone EXE: 57,633,720 bytes, FileVersion/ProductVersion 1.2.1, SHA-256 `AD11791EA859FCEA9E97F209EE0FC2615D6AD1C582AF91C023F1FF7F5B3AD0EE`.
+- Final setup package: 58,882,029 bytes, ProductVersion 1.2.1, SHA-256 `68AC3E67D3CD2DC76B8E09114475E7C10AFD962BE8BA7DAAF60FD37E9911FE92`.
+- The rebuilt standalone executable again passed the packaged self-test with exit code 0. Both release files are unsigned because no code-signing certificate was supplied.
+
+## 2026-08-30 - Pre-commit verification
+
+- Fresh unrestricted Windows suite: 118 tests passed, 0 failures, 0 skips (8.007 seconds).
+- Initial sandbox run: 106 passed and 12 Tk GUI tests skipped because the sandbox could not load the host Tcl runtime; the unrestricted rerun exercised all of them.
+- Compilation, dependency integrity, Ruff fatal/bugbear checks, and whitespace checks passed.
+- Checked all 19 README links/anchors, including the three screenshot files; the documented 3-panel bleed/overlap example matched the layout engine.
+- Scanned the intended source/documentation paths for common private-key and token patterns; no matches. Generated installers, local artwork, runtime logs, and the abandoned planning draft are excluded from the commit.
+- Scope: code/documentation commit and branch push, not a new binary build, installer deployment, or new printer/RIP acceptance test.

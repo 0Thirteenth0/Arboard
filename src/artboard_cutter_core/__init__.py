@@ -14,6 +14,8 @@ _EXPORTS = {
     "PDF_PRESERVE_EXPORT_MODE": ("modes", "PDF_PRESERVE_EXPORT_MODE"),
     "PT_PER_MM": ("units", "PT_PER_MM"),
     "PanelLayout": ("layout", "PanelLayout"),
+    "PendingExportJob": ("workflow", "PendingExportJob"),
+    "ProfileExportValues": ("workflow", "ProfileExportValues"),
     "add_evenly_distributed_panel": ("layout", "add_evenly_distributed_panel"),
     "compute_panel_layout": ("layout", "compute_panel_layout"),
     "compute_scale_matrix": ("units", "compute_scale_matrix"),

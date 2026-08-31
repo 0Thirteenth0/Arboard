@@ -94,8 +94,11 @@ def verify_raster_output(
         raise RuntimeError(
             f"Output verification failed for {output_path.name}: output is blank/uniform but the source crop contains artwork."
         )
-    warnings = () if icc_profile or not expect_icc else ("no embedded ICC profile",)
-    return VerificationResult(output_path, actual_size[0], actual_size[1], actual_dpi, actual_mode, uniform, warnings)
+    if expect_icc and not icc_profile:
+        raise RuntimeError(
+            f"Output verification failed for {output_path.name}: the requested ICC profile was not embedded."
+        )
+    return VerificationResult(output_path, actual_size[0], actual_size[1], actual_dpi, actual_mode, uniform)
 
 
 def verify_pdf_output(path: Path, *, expected_size_pt: tuple[float, float]) -> VerificationResult:

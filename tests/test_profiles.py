@@ -110,6 +110,19 @@ class ArtworkProfileTests(unittest.TestCase):
 
             self.assertEqual([p.file_name for p in profiles], ["Panel", "Panel2"])
 
+    def test_artboard_names_are_unique_even_with_case_and_suffix_collisions(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "Poster.ai"
+            make_multipage_pdf(
+                path,
+                page_specs=[(100, 80, (1, 0, 0)), (120, 90, (0, 1, 0)), (130, 90, (0, 0, 1))],
+            )
+
+            profiles = create_artwork_profiles(path, artboard_names=["Panel", "panel", "Panel2"])
+
+            names = [profile.file_name for profile in profiles]
+            self.assertEqual(len({name.casefold() for name in names}), 3)
+
     def test_sanitize_output_name_replaces_invalid_characters(self):
         self.assertEqual(sanitize_output_name("Counter/Desk:Left", "fallback"), "Counter_Desk_Left")
         self.assertEqual(sanitize_output_name("...", "fallback"), "fallback")

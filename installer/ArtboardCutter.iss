@@ -1,5 +1,5 @@
 #define MyAppName "Artboard Cutter"
-#define MyAppVersion "1.1.0"
+#include "version.iss"
 #define MyAppPublisher "Artboard Cutter"
 #define MyAppExeName "ArtboardCutter.exe"
 
@@ -21,6 +21,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#MyAppExeName}
+ChangesAssociations=yes
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
@@ -31,6 +32,12 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+[Registry]
+Root: HKA; Subkey: "Software\Classes\.artboard-job"; ValueType: string; ValueName: ""; ValueData: "ArtboardCutter.Job"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\ArtboardCutter.Job"; ValueType: string; ValueName: ""; ValueData: "Artboard Cutter Job"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\ArtboardCutter.Job\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKA; Subkey: "Software\Classes\ArtboardCutter.Job\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent

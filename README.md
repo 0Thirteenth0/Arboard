@@ -1,410 +1,288 @@
 # Artboard Cutter
 
-Artboard Cutter is a Windows desktop prepress tool for resizing artwork and splitting it into production-ready panels. It accepts PDF, AI-compatible PDF, JPG, PNG, TIFF, and multi-page artwork, then exports numbered PDF, JPG, or TIFF panels.
+Windows desktop tool for resizing large-format artwork and cutting it into numbered print panels, with outside bleed and repeated artwork at panel seams.
+
+**Version 1.2.1 · Windows x64 · Unsigned distribution**
+
+Import PDF, PDF-compatible Adobe Illustrator files, JPG, PNG, or TIFF. Export vector-preserving PDF panels or raster PDF/JPG/TIFF panels. Artwork is processed locally; Illustrator is not required for ordinary import, preview, or export.
 
 ## Contents
 
+- [Install and run](#install-and-run)
 - [Quick start](#quick-start)
-- [Workspace overview](#workspace-overview)
-- [Artwork queue](#artwork-queue)
-- [Panel dimensions and layout](#panel-dimensions-and-layout)
-- [Presets and layout templates](#presets-and-layout-templates)
-- [Raster and PDF Preserve modes](#raster-and-pdf-preserve-modes)
-- [Color and ICC profiles](#color-and-icc-profiles)
-- [Exporting](#exporting)
-- [Jobs, retry, and recovery](#jobs-retry-and-recovery)
-- [Troubleshooting](#troubleshooting)
-- [Development and release builds](#development-and-release-builds)
+- [Queue and live preview](#queue-and-live-preview)
+- [Dimensions, bleed, and overlap](#dimensions-bleed-and-overlap)
+- [Export modes and color](#export-modes-and-color)
+- [Presets and saved jobs](#presets-and-saved-jobs)
+- [Export safety and recovery](#export-safety-and-recovery)
+- [Output examples](#output-examples)
+- [Troubleshooting and limitations](#troubleshooting-and-limitations)
+- [Development and builds](#development-and-builds)
+- [Recent changes](#recent-changes)
 
-## Quick Start
+## Install and run
 
-1. Launch `ArtboardCutter.exe`.
-2. Click **Add Files...**, or drag supported artwork into any part of the Artwork Queue.
-3. Select an artwork row and enter its finished **Panel Widths** and **Height** in millimetres.
-4. Set **Bleed**, **Overlap**, and the overlap mode.
-5. Choose **Raster** or **PDF Preserve**.
-6. For Raster mode, choose the DPI, RGB/CMYK color mode, ICC behavior, and PDF/JPG/TIFF format.
-7. Choose an output folder.
-8. Tick the queue items you want to export.
-9. Click **Start Export**, review the preflight summary, and confirm.
+### Windows installer
 
-The program creates numbered files such as `Lobby_Wall_1.tif`, `Lobby_Wall_2.tif`, and `Lobby_Wall_3.tif`.
+Run `ArtboardCutter-1.2.1-Setup.exe` when supplied by the maintainer, or [build it from source](#build-the-installer). Setup installs the application, adds a Start menu shortcut, optionally adds a desktop shortcut, and registers `.artboard-job` files for opening with Artboard Cutter. Installation requests administrator permission.
 
-## Workspace Overview
+### Standalone executable
 
-The left side contains the live artwork preview. The right side contains the queue, export settings, run controls, and activity log. Themes and window proportions can change the appearance, but the workflow stays the same.
+Run `ArtboardCutter.exe` directly. The packaged application includes Python, Tcl/Tk, and its runtime dependencies; Python does not need to be installed separately. The standalone executable does not register Windows file associations by itself.
 
-![Artboard Cutter workspace with a six-panel preview](docs/screenshots/app_main.png)
+Both distribution formats are intentionally **unsigned**. Windows may display an unknown-publisher or SmartScreen warning. Only run a build from a source you trust, and follow any company security policy. Signing is not required for the application to work.
 
-The preview shows:
-
-- The resized full artwork.
-- Every numbered export panel.
-- Outside bleed and internal overlap areas.
-- Panel seams that can be dragged horizontally.
-- The total target dimensions and X/Y scale percentages.
-
-Preview controls:
-
-- **Fit** returns the whole artwork to the visible workspace.
-- **+ / -** or the mouse wheel zooms.
-- Middle-mouse drag pans.
-- Dragging an internal seam changes its two neighboring widths while preserving the total width.
-- **Add Panel** increases the panel count and evenly redistributes the complete artwork width.
-- The **Panels** number and **Set** button directly change the count and evenly divide the complete width.
-
-## Artwork Queue
-
-### Add artwork
-
-Use **Add Files...** or drag files into the Artwork Queue. File drops work over the queue rows and the empty-queue message.
-
-Supported input extensions:
-
-- `.pdf`
-- `.ai` when it contains PDF-compatible artwork
-- `.jpg` / `.jpeg`
-- `.png`
-- `.tif` / `.tiff`
-
-Multi-page PDF or AI-compatible files appear as a group with one editable queue profile per page/artboard. Each profile can have different dimensions and export settings.
-
-### Select what will be exported
-
-Selecting a row for editing is different from ticking it for export.
-
-- Click a queue row to load its settings and preview.
-- Tick its checkbox to include it in the next export.
-- **Check All**, **Uncheck All**, and **Check Selected** manage multiple rows.
-- **Remove** deletes selected queue rows; **Clear** empties the queue.
-
-Double-click a queue artwork name to edit the output base name. Invalid Windows filename characters are automatically rejected or cleaned when names come from Illustrator.
-
-For multi-artboard `.ai` files, **Get Names** attempts to read real artboard names from a running Adobe Illustrator installation. If Illustrator is unavailable or busy, numbered names are used safely.
-
-## Panel Dimensions and Layout
-
-All production dimensions are entered in millimetres.
-
-### Panel Widths
-
-Enter one content width per panel, separated by spaces or commas:
+Built binaries are not checked into this Git repository. Local build outputs are:
 
 ```text
-1200 1200 1200 100 1250 1000
+dist\ArtboardCutter.exe
+release\ArtboardCutter-1.2.1-Setup.exe
 ```
 
-The number of values is the number of output panels. Their sum is the full artwork content width before outside bleed.
+## Quick start
 
-### Height
+1. Click **Add Files...** or drag artwork anywhere inside **Artwork Queue**, including the empty-queue message.
+2. Click an artwork row to edit it. Multi-page documents have a separate row for each page/artboard.
+3. Enter **Panel Widths (mm)** and **Height (mm)**. For three equal panels across 3000 mm, enter `1000 1000 1000`.
+4. Set **Bleed**, **Overlap**, and **Shared** or **Left** overlap mode.
+5. Choose **Raster** for PDF/JPG/TIFF pixel output, or **PDF Preserve** to retain source vector content in PDF.
+6. In Raster mode, set DPI, RGB/CMYK, and optional ICC handling.
+7. Choose the **Output Folder** and tick the rows to export. Highlighting a row is not the same as ticking it.
+8. Click **Start Export**, review the preflight and replacement prompts, then confirm.
 
-**Height** is the finished content height. Top and bottom bleed are added during export. **Reset Size** restores both the panel width and height to the original artwork dimensions.
+A queue item named `Lobby_Wall` produces files such as `Lobby_Wall_1.tif`, `Lobby_Wall_2.tif`, and `Lobby_Wall_3.tif`.
 
-### Bleed
+## Queue and live preview
 
-Bleed is applied only around the outside of the complete assembled artwork:
+The preview is on the left. The right-hand column contains the queue, settings, run controls, and Activity Log; it scrolls vertically when needed.
 
-- Left edge of the first panel.
-- Right edge of the last panel.
-- Top and bottom of every panel.
+### Queue actions
 
-It is not repeatedly inserted between internal panels.
+- **Add Files...** accepts `.pdf`, PDF-compatible `.ai`, `.jpg`, `.jpeg`, `.png`, `.tif`, and `.tiff`.
+- Click a row to load its independent settings and preview; tick its checkbox to include it in an export.
+- **Check All**, **Uncheck All**, and **Check Selected** control batch selection.
+- Double-click an artwork name to change the output filename base. Names must be valid Windows filenames and unique across the planned outputs.
+- **Remove** removes selected rows; **Clear** empties the queue, including pending imports.
+- **Get Names** optionally reads artboard names from an already-running Adobe Illustrator installation. If unavailable or busy, the app keeps numbered fallback names.
 
-### Overlap
+Import, preview rendering, and export use background workers. Preview images are resolution-limited for display; they do not represent the export DPI.
 
-Overlap adds shared artwork at internal seams:
+### Preview controls
 
-- **Shared** divides the overlap equally between the two neighboring panels. A 40 mm overlap places 20 mm on each side of the seam.
-- **Left** places the complete overlap on the left edge of the right-hand panel. The preceding panel ends at its content edge.
+- **Fit** shows the complete artwork.
+- **+ / -** or the mouse wheel zooms; middle-mouse drag pans.
+- Drag an internal seam to change its two neighboring widths while keeping their combined width unchanged.
+- **Add Panel** adds one panel and redistributes the full current content width evenly.
+- **Panels / Set** evenly divides the full current content width into the requested count.
 
-Overlap must be smaller than the narrowest panel.
+Changing the panel count replaces any unequal widths. The preview reports target dimensions, panel count, bleed/overlap, and X/Y scale percentages. Different X/Y percentages mean non-uniform stretching; the app asks for confirmation before export.
 
-### Even panel distribution
+## Dimensions, bleed, and overlap
 
-**Add Panel** and the direct **Panels / Set** control always use the full current artwork width. For example:
+All production dimensions use **millimetres**.
+
+**Panel Widths** contains one finished content width per panel, separated by spaces or commas. Their sum is the full content width. **Height** is the finished content height for every panel. **Reset Size** restores the original source width and height, returning to a single full-width panel.
+
+For example, `600 400` totals 1000 mm. Setting **Panels** to `4` produces `250 250 250 250`; Add Panel does not split only the last panel.
+
+### Outside bleed
+
+Bleed extends the left edge of the first panel, the right edge of the last panel, and the top/bottom of every panel. It is not inserted repeatedly at internal seams.
+
+The full source artwork is scaled to the target extent including outside bleed, then clipped into panels. The app does not invent missing edge artwork or generate mirrored bleed; check that the source is suitable for this sizing method.
+
+### Internal overlap
+
+- **Shared:** split the overlap equally around a seam. With 40 mm overlap, the left panel extends 20 mm right of the seam and the right panel extends 20 mm left of it.
+- **Left:** place the complete overlap on the left edge of the right-hand panel. The preceding panel ends at its content edge.
+
+Overlap must be smaller than the narrowest panel. A blank Overlap field defaults to twice the bleed; enter `0` explicitly when no overlap is wanted.
+
+With widths `1000 1000 1000`, height `2000`, bleed `10`, and Shared overlap `40`, the full target is 3020 × 2020 mm. Exported panel widths are 1030, 1040, and 1030 mm. Their sum is larger than the assembled width because seam artwork repeats.
+
+## Export modes and color
+
+| Setting | Raster | PDF Preserve |
+| --- | --- | --- |
+| Output | PDF, JPG, TIFF/BigTIFF | PDF only |
+| Vector text/shapes | Rendered to pixels | Retained where supported by the source PDF |
+| DPI | Controls raster resolution | Not applicable |
+| RGB/CMYK and ICC controls | Available | Disabled; source PDF content is retained |
+| Raster source images | Resampled to the target | Embedded in PDF; not traced into vectors |
+
+**PDF Preserve** scales the full source page, then clips panels from the scaled master. It retains the default hidden/visible state of source PDF/Illustrator optional-content layers. This uses the PDF-compatible data saved in the file, not unsaved changes in an open Illustrator document. Save the AI file before importing/exporting.
+
+**Raster** writes the selected format: JPG creates `.jpg`, TIFF creates `.tif`, and raster PDF creates `.pdf`. Large JPG/raster-PDF panels may use a lower common effective DPI to stay within the full-frame memory limit. TIFF streams width-adaptive strips to retain the requested DPI and uses BigTIFF for sufficiently large outputs.
+
+### ICC handling in Raster mode
+
+- **Off:** no selected output-profile conversion or embedding.
+- **Embed only:** attach the selected profile without changing pixel values.
+- **Convert:** transform pixels into the selected output profile, then embed it.
+
+Choose an RGB profile for RGB output or a CMYK profile for CMYK output. Supported files use `.icc` or `.icm`. JPG/TIFF embed the profile; raster PDF uses an output intent.
+
+Conversion uses an embedded RGB source profile from supported raster inputs when available, otherwise an sRGB working-space assumption. PDF/AI source profiles are not fully discoverable through this workflow. Use the profile and rendering intent supplied by the printer/RIP operator for color-critical work.
+
+Rendering intents are Perceptual, Relative Colorimetric, Saturation, and Absolute Colorimetric. They affect conversion, not Embed only.
+
+## Presets and saved jobs
+
+### Export presets
+
+Presets store reusable export behavior: bleed, overlap/mode, DPI, color mode, export mode/format, and ICC settings. Select a preset and click **Apply**; choosing its name alone does not apply it. **Save** stores the current export settings under a name, and **Delete** removes that preset.
+
+Presets do **not** change panel widths, height, output name, or output folder. The former **Layout Template** feature has been removed; use Panels / Set, Add Panel, or direct width editing instead.
+
+### Save Job / Load Job
+
+**Save Job...** writes the queue and each artwork's settings to a versioned `.artboard-job` file. **Load Job...** restores it and asks before replacing an existing queue.
+
+Job files preserve source paths, page selection, output names, dimensions, panel widths, selection state, and export settings. They do **not** embed source artwork or save the application-level output folder. Keep source files available and check the destination before exporting a loaded job.
+
+- After installer registration, double-click an `.artboard-job` file to launch the app and load it.
+- With the standalone executable, use **Open with** or pass a job path on the command line.
+- Older `.artboard-job.json` files still load through Load Job or an explicit Open With. Re-save them as `.artboard-job` for the dedicated Windows association.
+- Artboard Cutter does not associate itself with every `.json` file.
+- Missing artwork paths are marked **Source missing**; a saved job is not a backup of the artwork.
+
+```powershell
+.\dist\ArtboardCutter.exe "C:\Artwork Jobs\Lobby.artboard-job"
+```
+
+## Export safety and recovery
+
+Before exporting, preflight checks dimensions and formats, output names, folder write access, existing panel files, estimated disk usage, and large-raster memory requirements. It asks before replacing existing or stale numbered panels.
+
+Each artwork's full panel set is written to temporary staged files first. Verification checks applicable formats, dimensions, DPI, color modes, requested profiles, and unexpected blank/uniform output. Only a successfully verified panel set replaces the destination files. This is a safety check, not a substitute for a visual print proof.
+
+**Cancel Export** stops at a safe processing boundary. Previously completed jobs remain available; the incomplete panel set is discarded and unstarted jobs become **Interrupted**. **Retry Failed / Resume** selects unfinished/failed rows and regenerates those jobs, rather than resuming halfway through an individual file.
+
+The queue is periodically saved for crash recovery. After an abnormal shutdown, a normal launch offers to restore it; closing normally removes the recovery snapshot. Opening a specific saved job at startup takes precedence over the recovery prompt.
+
+The **Activity Log** shows preflight, crop, DPI, writer, ICC, verification, and error details. **Open Logs Folder** opens persistent logs. Settings and recovery data normally live alongside them:
 
 ```text
-Current widths: 600 400        Total: 1000 mm
-Set panels to: 4
-New widths:     250 250 250 250
+%LOCALAPPDATA%\ArtboardCutter\settings.json
+%LOCALAPPDATA%\ArtboardCutter\session-recovery.artboard-job.json
+%LOCALAPPDATA%\ArtboardCutter\logs\
 ```
 
-This does not repeatedly split only the last panel.
+## Output examples
 
-## Presets and Layout Templates
+These screenshots illustrate numbered panel output and assembly in Illustrator; they are output examples, not screenshots of the current application controls.
 
-![Current export settings, presets, layout templates, ICC controls, and output folder](docs/screenshots/export_settings_current.png)
+![Numbered panel PDFs in the output folder](docs/screenshots/output_panel_names.png)
 
-### Export Preset
+![Six exported panels arranged with their outlines in Adobe Illustrator](docs/screenshots/output_panels_showing%20outline.png)
 
-A preset stores reusable production/export behavior:
+![Combined artwork assembled from exported panels in Adobe Illustrator](docs/screenshots/output_combined_adobe_illustrator.png)
 
-- Bleed and overlap.
-- Shared or Left overlap mode.
-- DPI.
-- RGB or CMYK.
-- Raster/PDF Preserve mode.
-- PDF, JPG, or TIFF format.
-- ICC handling, output profile path, and rendering intent.
+## Troubleshooting and limitations
 
-A preset deliberately does **not** change:
+| Symptom | Check |
+| --- | --- |
+| JPG/TIFF export makes PDF | Select **Raster** first. PDF Preserve always exports PDF. |
+| Hidden Illustrator layer reappears | Use v1.2.1 or newer, save the AI file, and confirm the source's saved PDF-compatible layer state. |
+| Double-clicking a job does not load it | Use the current executable or install the current setup package. Legacy JSON jobs need Load Job or explicit Open With. |
+| A preset appears to do nothing | Click **Apply** and inspect export settings. Dimensions and output folder intentionally stay unchanged. |
+| Files cannot be dropped | Drop inside Artwork Queue. Avoid running only Artboard Cutter as Administrator while Explorer runs normally. |
+| A TIFF panel is blank or verification fails | Check the source crop and Activity Log. Review disk space and try a small proof export. |
+| Raster DPI is lower than entered | Check preflight's effective DPI. Large JPG/raster-PDF panels share a reduced safe DPI; TIFF is streamed. |
+| Illustrator names are unavailable | Illustrator must already be running and free of modal/missing-link dialogs. Numbered names remain usable. |
+| Check for Updates is unavailable | No hosted update manifest is configured by default. Install a new supplied build or rebuild from source. |
 
-- Panel widths.
-- Artwork height.
-- Output folder.
-- Queue output name.
+Production acceptance still requires checks in the intended printer/RIP, particularly for spot colors, overprint, transparency, linked assets, Illustrator-only constructs, very large TIFF/BigTIFF files, and extreme dimensions. PDF Preserve does not promise native Illustrator editability or remove hidden source content permanently; it retains default layer visibility in the PDF.
 
-Use **Save** to name the current export settings, **Apply** to load a selected preset, and **Delete** to remove one.
+## Development and builds
 
-### Layout Template
+### Run from source
 
-A layout template stores only the number and relative proportions of the panels. It never changes the overall artwork width or height.
+Use 64-bit Python with a working Tk runtime. CI is configured for Python 3.13; the local v1.2.1 Windows build was tested with Python 3.14.6. Dependencies are pinned in `requirements.txt` and `requirements-dev.txt`.
 
-For example, saving widths `250 500 250` creates a `25% / 50% / 25%` template. Applying that template to artwork with a 2000 mm total width produces `500 1000 500`.
-
-Use layout templates for recurring arrangements such as equal panels, a wide center panel, or narrow end returns. Use export presets separately for print-production settings.
-
-## Raster and PDF Preserve Modes
-
-### Raster
-
-Raster mode renders the resized artwork to pixels and supports:
-
-- Raster PDF.
-- JPG.
-- TIFF and BigTIFF.
-- Explicit DPI.
-- RGB or CMYK output.
-- ICC conversion or profile embedding.
-
-The full artwork is resized first and then cropped into panels. If the entered target proportions differ from the source, the program warns that X and Y will be stretched by different amounts.
-
-Large JPG and raster-PDF panels may use a lower common effective DPI to stay within safe memory limits. TIFF uses streamed 256-row bands and retains the requested DPI, including very large BigTIFF output.
-
-### PDF Preserve
-
-PDF Preserve always outputs PDF. It resizes the complete source artwork and clips the panels from that resized master.
-
-- Vector PDF/AI-compatible content remains vector when possible.
-- Raster source images remain raster images embedded in PDF; they are not traced into vectors.
-- DPI, raster format, RGB/CMYK, and ICC raster controls are disabled because they do not apply to this path.
-
-Use PDF Preserve when maintaining vector text, shapes, and line art is more important than generating fixed raster pixels.
-
-## Color and ICC Profiles
-
-These controls apply to Raster mode.
-
-### Color Mode
-
-- **RGB** creates three-channel RGB raster output.
-- **CMYK** creates four-channel CMYK raster output.
-
-### ICC Handling
-
-- **Off** performs no ICC conversion and embeds no selected output profile.
-- **Embed only** assigns and embeds the selected output profile without changing pixel values.
-- **Convert** transforms the raster pixels into the selected output profile and embeds it.
-
-When **Convert** is selected, the program uses an embedded RGB profile from supported raster input when available. Otherwise it assumes an sRGB working space. PDF and AI source profiles are not always directly discoverable, so confirm the intended source space for color-critical legacy files.
-
-The selected ICC profile must match **Color Mode**: choose an RGB output profile for RGB and a CMYK output profile for CMYK. JPG and TIFF contain the embedded profile; raster PDF receives an output intent.
-
-### Rendering Intent
-
-Rendering intent is used only during ICC conversion:
-
-- **Perceptual** is a common choice for photographic or wide-gamut artwork.
-- **Relative Colorimetric** preserves in-gamut colors and maps the source white to the destination white.
-- **Saturation** favors vividness over precise color relationships.
-- **Absolute Colorimetric** preserves the source white-point relationship and is generally used for proofing workflows.
-
-When unsure, use the profile and rendering intent required by the printer or RIP operator.
-
-## Exporting
-
-### Preflight
-
-After **Start Export**, preflight reports or checks:
-
-- Jobs and total panel count.
-- Planned output filenames and duplicate-name conflicts.
-- Output-folder write access.
-- Existing or stale numbered panel files.
-- Requested and effective DPI.
-- Largest panel megapixels.
-- Estimated raw image data and output disk space.
-- TIFF/BigTIFF streaming status.
-- Available disk space and large-job warnings.
-
-Review the information before continuing. If existing panels will be replaced, the program asks for confirmation.
-
-### Safe output and verification
-
-Every panel set is written to staged temporary files first. Before final files are committed, the program verifies applicable properties including:
-
-- Actual file format.
-- Pixel or PDF page dimensions.
-- DPI metadata.
-- RGB/CMYK mode.
-- Embedded ICC profile when requested.
-- Silent blank or uniform render failures.
-
-If a panel fails, the incomplete staged set is discarded instead of replacing a previously successful panel set.
-
-### Output filenames
-
-Each panel uses the queue output name followed by its one-based panel number:
-
-![Numbered PDF panel files in the output folder](docs/screenshots/output_panel_names.png)
-
-The separate panels are designed to align when assembled with the configured overlap:
-
-![Six exported panels aligned in Adobe Illustrator](docs/screenshots/output_panels_showing%20outline.png)
-
-![Combined exported artwork in Adobe Illustrator](docs/screenshots/output_combined_adobe_illustrator.png)
-
-### Cancel and activity log
-
-**Cancel Export** stops safely after the current bounded operation. Successfully committed earlier jobs remain available, while the incomplete active panel set is discarded.
-
-The Activity Log shows preflight information, effective DPI, crop positions, TIFF writer details, ICC actions, verification results, warnings, and errors. **Open Logs Folder** opens the persistent structured logs under:
-
-```text
-%LOCALAPPDATA%\ArtboardCutter\logs
-```
-
-## Jobs, Retry, and Recovery
-
-### Save and load a complete job
-
-**Save Job...** writes the complete queue and its per-artwork settings to an `.artboard-job.json` file. **Load Job...** restores that queue later.
-
-Use a job file when you need the exact artwork paths, names, dimensions, selected pages, panel widths, and export settings. Use a preset when you only need reusable production behavior.
-
-### Retry Failed / Resume
-
-If one or more jobs fail or are cancelled, click **Retry Failed / Resume**. The program selects only failed or interrupted queue items and restarts them. Completed jobs are not selected again.
-
-Each individual panel set is transactional, so an interrupted job resumes by safely regenerating that job rather than trusting a partial output set.
-
-### Session recovery
-
-The queue is periodically saved during the active session. After an abnormal shutdown, the next launch offers to restore it. A normal application close removes the temporary recovery session.
-
-## Troubleshooting
-
-### A TIFF panel is empty
-
-Current TIFF output is streamed and automatically checked for blank/uniform failures. If verification stops the export:
-
-1. Read the Activity Log and open the persistent logs.
-2. Confirm the source crop actually contains artwork.
-3. Check available disk space.
-4. Try PDF Preserve if the source is vector PDF/AI artwork.
-
-Do not use an older executable that predates the streamed TIFF and verification changes.
-
-### JPG or TIFF appears to be a PDF
-
-Confirm **Export Mode** is Raster and **Export Format** is JPG or TIFF. PDF Preserve intentionally forces PDF output.
-
-### Files will not drop into the queue
-
-Drop supported files anywhere inside the Artwork Queue, including over the empty message. If Windows blocks drag-and-drop between applications running at different privilege levels, launch both applications normally rather than running only one as Administrator.
-
-### A preset does not change panel dimensions
-
-This is intentional. Export presets do not contain dimensions. Use **Layout Template**, the direct panel count, **Add Panel**, or edit **Panel Widths** manually.
-
-### ICC profile is rejected
-
-Verify that:
-
-- The file exists and is a valid `.icc` or `.icm` profile.
-- Its color space matches RGB/CMYK.
-- ICC Handling is set to Off if no profile should be used.
-
-### Export uses a lower DPI
-
-Very large JPG and raster-PDF jobs can exceed the safe full-frame render limit. Preflight reports the common reduced DPI before export. TIFF uses bounded streaming and normally retains the requested DPI.
-
-### Existing output files block export
-
-Approve the replacement prompt if the files belong to the same job. Replacement and stale extra-panel removal happen only after the new complete set succeeds.
-
-### Illustrator artboard names are unavailable
-
-Real `.ai` artboard-name lookup requires Windows, Adobe Illustrator, and `pywin32`. Illustrator can also be blocked by a missing-link dialog. Close Illustrator dialogs or keep the automatically generated names.
-
-## Current Features
-
-- Multi-page/artboard queue with independent per-page settings.
-- Editable output names and Illustrator name lookup.
-- Outside-only bleed and Shared/Left internal overlap.
-- Custom, evenly distributed, and proportion-template panel layouts.
-- Raster PDF, JPG, streamed TIFF/BigTIFF, and PDF Preserve.
-- RGB/CMYK and ICC-managed raster output.
-- Large-job preflight, transactional output, and automatic verification.
-- Cancellation, retry/resume, saved job files, and crash recovery.
-- Persistent presets, output history, themes, window settings, and structured logs.
-
-## Development and Release Builds
-
-### Project layout
-
-```text
-artboard_cutter_gui_advanced.py   Main desktop app entry point
-src/artboard_cutter_core/         Export engine, layout, settings, profiles
-tests/                            Automated unit, export, and GUI tests
-docs/                             Testing notes and guide screenshots
-ai_logs/                          AI-assisted development journal
-assets/                           Application icon and local UI icons
-installer/                        Inno Setup installer definition
-tools/                            Build and release utilities
-```
-
-### Development setup
+From the repository root:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe artboard_cutter_gui_advanced.py
 ```
 
-Run tests:
+### Test
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q artboard_cutter_gui_advanced.py src tests tools packaging_hooks
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-### Build the Windows executable
+The v1.2.1 suite contains 118 tests covering geometry, export formats, TIFF content, hidden layers, settings/jobs, startup loading, transactional writes, queue lifecycle, and themes. GUI tests can skip if the host cannot initialize Tk or capture a desktop. See [testing notes](docs/testing.md) for manual integration checks and [recorded results](ai_logs/test_results.md) for dated evidence.
+
+### Build the standalone executable
 
 ```powershell
 .\build_exe.bat
 ```
 
-Output:
+The build validates Tk initialization, generates icon/version resources, and packages the app with PyInstaller. Custom hooks in `packaging_hooks/` collect Tcl/Tk for Windows. Test the packaged application after building:
+
+```powershell
+$process = Start-Process .\dist\ArtboardCutter.exe -ArgumentList '--self-test' -WindowStyle Hidden -PassThru
+if (-not $process.WaitForExit(60000)) {
+    Stop-Process -Id $process.Id
+    throw 'Packaged self-test timed out.'
+}
+if ($process.ExitCode -ne 0) { throw 'Packaged self-test failed.' }
+```
+
+The self-test initializes Tk/TkDND and exercises TIFF output. The Windows GitHub Actions workflow also tests and builds the standalone EXE, then uploads it as a workflow artifact. It does not automatically publish a GitHub release or build the Inno installer.
+
+### Build the installer
+
+Install Inno Setup 6 and make `ISCC.exe` available on `PATH`. For a default current-user installation, the following also works:
+
+```powershell
+$env:PATH = "$env:LOCALAPPDATA\Programs\Inno Setup 6;$env:PATH"
+.\tools\build_release.ps1 -CertificateThumbprint ''
+```
+
+This rebuilds the standalone executable and compiles `installer/ArtboardCutter.iss` into `release/ArtboardCutter-1.2.1-Setup.exe`. The empty certificate argument explicitly keeps the build unsigned. If ISCC is not on PATH, the script leaves the standalone EXE and prints a warning instead of producing an installer.
+
+`APP_VERSION` in `src/artboard_cutter_core/version.py` is the version source. `tools/generate_version_metadata.py` generates `version_info.txt` and `installer/version.iss`. `update-manifest.example.json` is only a template; automatic update checking requires a configured HTTPS manifest URL.
+
+Build outputs (`build/`, `dist/`, `release/`), source artwork, runtime logs, and test exports stay out of Git. Share binaries separately as release assets when publishing a release.
+
+### Project layout
 
 ```text
-dist\ArtboardCutter.exe
+artboard_cutter_gui_advanced.py   Desktop entry point and UI
+src/artboard_cutter_core/         Export engine, geometry, profiles, settings, jobs
+tests/                            Unit, export, and Windows GUI regressions
+docs/                             Testing guide and output screenshots
+ai_logs/                          Development history and verification records
+assets/                           Application icon and UI icons
+installer/                        Inno Setup definition and generated version
+packaging_hooks/                  Tcl/Tk PyInstaller collection/runtime hooks
+tools/                            Build and metadata utilities
+.github/workflows/                Windows test/build automation
 ```
 
-The build embeds the application icon, local UI icons, Tcl/Tk, TIFF streaming dependencies, and Windows version metadata.
+## Recent changes
 
-### Build and sign an installer
+### 1.2.1
 
-With Inno Setup 6 installed:
+- Preserve default-hidden Illustrator/PDF layers in PDF Preserve panels.
+- Load saved jobs passed to the executable by Windows Explorer.
+- Save new jobs as `.artboard-job`, retain legacy JSON-job compatibility, and add installer file association.
+- Supply an unsigned standalone EXE and Inno Setup installer.
 
-```powershell
-.\tools\build_release.ps1
-```
+### Earlier reliability and usability updates included in this branch
 
-For Authenticode signing, set the application-specific certificate variable first:
+- Correct JPG/TIFF output formats; stream large TIFF panels with blank-output verification.
+- Evenly redistribute the full artwork width when adding/setting panels.
+- Keep presets separate from dimensions/output folder; remove Layout Template.
+- Improve panel-count field contrast across themes and queue drop targets.
+- Harden cancellation, recovery, stale imports, numeric validation, output-name collisions, and output replacement.
+- Bundle Tcl/Tk explicitly and test the packaged runtime before distribution.
 
-```powershell
-$env:ARTBOARD_CUTTER_CERT_THUMBPRINT = "YOUR_CERTIFICATE_THUMBPRINT"
-.\tools\build_release.ps1
-```
-
-`update-manifest.example.json` documents the HTTPS release metadata format. Configure `UPDATE_MANIFEST_URL` in `src/artboard_cutter_core/version.py` when a hosted update channel is available.
+See [development decisions](ai_logs/decisions.md) and the [session log](ai_logs/session_log.md) for the implementation history.

@@ -17,6 +17,94 @@ from .units import mm_to_pt, pt_to_mm
 from .verification import verify_pdf_output
 
 
+def _ocg_objects(doc) -> list[tuple[int, str]]:
+    """Return optional-content group xrefs and names in stable PDF object order."""
+    groups = []
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type")[1] != "/OCG":
+                continue
+            name_type, name = doc.xref_get_key(xref, "Name")
+        except Exception:
+            continue
+        groups.append((xref, name if name_type == "string" else ""))
+    return groups
+
+
+def _ocg_default_states(doc) -> list[tuple[str, bool]]:
+    """Capture each source layer's initial visibility without changing the document."""
+    groups = _ocg_objects(doc)
+    if not groups:
+        return []
+    try:
+        layer = doc.get_layer() or {}
+    except Exception:
+        layer = {}
+    explicitly_on = set(layer.get("on", ()))
+    explicitly_off = set(layer.get("off", ()))
+    defaults = []
+    for xref, name in groups:
+        if xref in explicitly_off:
+            visible = False
+        elif xref in explicitly_on:
+            visible = True
+        else:
+            # PDF viewers treat an OCG as visible when the default configuration
+            # does not explicitly place it in /OFF.
+            visible = True
+        defaults.append((name, visible))
+    return defaults
+
+
+def _restore_ocg_default_states(output_doc, source_states: list[tuple[str, bool]]) -> None:
+    """Rebuild /OCProperties after show_pdf_page imports Illustrator layers.
+
+    PyMuPDF imports the OCG objects referenced by page content but not the source
+    catalog's /OCProperties entry. Without that entry, PDF viewers show every
+    imported group, including Illustrator layers that were hidden at export time.
+    """
+    output_groups = _ocg_objects(output_doc)
+    if not output_groups or not source_states:
+        return
+
+    states_by_name: dict[str, list[bool]] = {}
+    for name, visible in source_states:
+        states_by_name.setdefault(name, []).append(visible)
+    name_offsets: dict[str, int] = {}
+    all_refs = []
+    on_refs = []
+    off_refs = []
+    for xref, name in output_groups:
+        all_refs.append(f"{xref} 0 R")
+        occurrences = states_by_name.get(name, ())
+        occurrence = name_offsets.get(name, 0)
+        visible = occurrences[occurrence] if occurrence < len(occurrences) else True
+        name_offsets[name] = occurrence + 1
+        (on_refs if visible else off_refs).append(f"{xref} 0 R")
+
+    output_doc.xref_set_key(
+        output_doc.pdf_catalog(),
+        "OCProperties",
+        "<< "
+        f"/OCGs [{' '.join(all_refs)}] "
+        "/D << "
+        f"/ON [{' '.join(on_refs)}] "
+        f"/OFF [{' '.join(off_refs)}] "
+        f"/Order [{' '.join(all_refs)}] "
+        "/RBGroups [] "
+        ">> >>",
+    )
+
+
+def _pdf_clip_varies(doc, page_index: int, clip) -> bool:
+    page = doc.load_page(page_index)
+    longest = max(1.0, float(clip.width), float(clip.height))
+    scale = min(1.0, 128.0 / longest)
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, colorspace=fitz.csRGB, alpha=False)
+    value = getattr(pix, "is_unicolor", False)
+    return not bool(value() if callable(value) else value)
+
+
 def export_artboards_vector_uniform(
     src_doc,
     widths_mm,
@@ -35,6 +123,9 @@ def export_artboards_vector_uniform(
     cancel_check=None,
     verify_outputs: bool = True,
 ):
+    fit_mode = str(fit_mode or "stretch").strip().lower()
+    if fit_mode not in {"stretch", "width", "height"}:
+        raise ValueError(f"Unsupported PDF Preserve fit mode: {fit_mode}")
     working_doc = src_doc
     converted_doc = None
     if not getattr(src_doc, "is_pdf", True):
@@ -44,6 +135,7 @@ def export_artboards_vector_uniform(
     try:
         page = working_doc.load_page(page_index)
         src_rect = page.rect
+        source_ocg_states = _ocg_default_states(working_doc)
 
         bleed_eff = max(0.0, float(bleed_mm))
         panel_layout, target_w_mm, overlap_mm = compute_panel_layout(widths_mm, bleed_eff, overlap_mm, overlap_mode)
@@ -86,18 +178,18 @@ def export_artboards_vector_uniform(
 
         if fit_mode == "stretch":
             _export_artboards_vector_stretch_from_master(
-            src_doc=working_doc,
-            page_index=page_index,
-            src_rect=src_rect,
-            panel_layout=panel_layout,
-            target_w_pt=target_w_pt,
-            target_h_pt=target_h_pt,
-            target_w_mm=target_w_mm,
-            target_h_mm=target_h_mm,
-            base_name=base_name,
-            outdir=outdir,
-            sx=sx,
-            sy=sy,
+                src_doc=working_doc,
+                page_index=page_index,
+                src_rect=src_rect,
+                panel_layout=panel_layout,
+                target_w_pt=target_w_pt,
+                target_h_pt=target_h_pt,
+                target_w_mm=target_w_mm,
+                target_h_mm=target_h_mm,
+                base_name=base_name,
+                outdir=outdir,
+                sx=sx,
+                sy=sy,
                 log_cb=log_cb,
                 structured_logger=structured_logger,
                 final_paths=final_paths,
@@ -105,6 +197,7 @@ def export_artboards_vector_uniform(
                 cleanup_stale=cleanup_stale,
                 cancel_check=cancel_check,
                 verify_outputs=verify_outputs,
+                source_ocg_states=source_ocg_states,
             )
             return final_paths
 
@@ -119,7 +212,12 @@ def export_artboards_vector_uniform(
                 w_t = x1_t - x0_t
                 h_t = target_h_pt
 
-                clip_src = fitz.Rect(x0_t / sx, 0.0 / sy, x1_t / sx, target_h_pt / sy)
+                clip_src = fitz.Rect(
+                    src_rect.x0 + x0_t / sx,
+                    src_rect.y0,
+                    src_rect.x0 + x1_t / sx,
+                    src_rect.y0 + target_h_pt / sy,
+                )
 
                 log_event(
                     structured_logger,
@@ -137,6 +235,7 @@ def export_artboards_vector_uniform(
                     out_page = out.new_page(width=w_t, height=h_t)
                     force_page_boxes(out_page)
                     out_page.show_pdf_page(out_page.rect, working_doc, page_index, clip=clip_src, keep_proportion=True)
+                    _restore_ocg_default_states(out, source_ocg_states)
                     out_name = final_paths[idx].name
                     out.save(outputs.stage_paths[idx])
                 finally:
@@ -144,6 +243,10 @@ def export_artboards_vector_uniform(
 
                 if verify_outputs:
                     result = verify_pdf_output(outputs.stage_paths[idx], expected_size_pt=(w_t, h_t))
+                    if _pdf_clip_varies(working_doc, page_index, clip_src) and result.uniform:
+                        raise RuntimeError(
+                            f"Output verification failed for {out_name}: output is blank/uniform but source contains artwork."
+                        )
                     if log_cb:
                         log_cb(f"[VERIFY] {result.summary}")
 
@@ -181,6 +284,7 @@ def _export_artboards_vector_stretch_from_master(
     cleanup_stale: bool = False,
     cancel_check=None,
     verify_outputs: bool = True,
+    source_ocg_states: list[tuple[str, bool]] | None = None,
 ) -> None:
     """
     Vector stretch pipeline:
@@ -236,6 +340,7 @@ def _export_artboards_vector_stretch_from_master(
                     out_page = out.new_page(width=w_t, height=h_t)
                     force_page_boxes(out_page)
                     out_page.show_pdf_page(out_page.rect, master, 0, clip=master_clip, keep_proportion=False)
+                    _restore_ocg_default_states(out, source_ocg_states or [])
                     out_name = final_paths[idx].name
                     out.save(outputs.stage_paths[idx])
                 finally:
@@ -243,6 +348,10 @@ def _export_artboards_vector_stretch_from_master(
 
                 if verify_outputs:
                     result = verify_pdf_output(outputs.stage_paths[idx], expected_size_pt=(w_t, h_t))
+                    if _pdf_clip_varies(master, 0, master_clip) and result.uniform:
+                        raise RuntimeError(
+                            f"Output verification failed for {out_name}: output is blank/uniform but source contains artwork."
+                        )
                     if log_cb:
                         log_cb(f"[VERIFY] {result.summary}")
 

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image, ImageCms
 try:
@@ -9,9 +10,11 @@ except ImportError:
     import fitz  # type: ignore
 
 from src.artboard_cutter_core.export import ExportOptions, process_file
-from src.artboard_cutter_core.preflight import estimate_export_job
-from src.artboard_cutter_core.raster_export import should_use_bigtiff
-from src.artboard_cutter_core.verification import verify_raster_output
+from src.artboard_cutter_core.preflight import combined_disk_space_warning, estimate_export_job
+from src.artboard_cutter_core.raster_export import should_use_bigtiff, tiff_band_rows
+from src.artboard_cutter_core.validation import validate_export_values
+from src.artboard_cutter_core.verification import VerificationResult, verify_raster_output
+from tests.helpers import make_grid_pdf
 
 
 class ExportImprovementTests(unittest.TestCase):
@@ -84,6 +87,41 @@ class ExportImprovementTests(unittest.TestCase):
                     source_varies=True,
                 )
 
+    def test_verifier_rejects_missing_requested_icc_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "unprofiled.jpg"
+            Image.new("RGB", (20, 10), "white").save(path, dpi=(100, 100))
+            with self.assertRaisesRegex(RuntimeError, "ICC profile was not embedded"):
+                verify_raster_output(
+                    path,
+                    expected_size=(20, 10),
+                    expected_dpi=100,
+                    expected_mode="RGB",
+                    source_varies=False,
+                    expect_icc=True,
+                )
+
+    def test_pdf_preserve_verification_rejects_uniform_output_for_varying_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "grid.pdf"
+            make_grid_pdf(source, width_mm=100, height_mm=100)
+            fake_result = VerificationResult(root / "stage.pdf", None, None, None, "PDF", True)
+            with patch("src.artboard_cutter_core.vector_export.verify_pdf_output", return_value=fake_result):
+                with self.assertRaisesRegex(Exception, "blank/uniform"):
+                    process_file(
+                        source,
+                        ExportOptions(
+                            0,
+                            [100],
+                            100,
+                            0,
+                            72,
+                            root / "out",
+                            preserve_vectors=True,
+                        ),
+                    )
+
     def test_tiff_preflight_retains_requested_dpi_and_flags_large_jobs(self):
         estimate = estimate_export_job(
             widths_mm=[5000, 5000],
@@ -100,9 +138,81 @@ class ExportImprovementTests(unittest.TestCase):
         self.assertTrue(estimate.uses_streaming_tiff)
         self.assertTrue(estimate.warnings)
 
+    def test_pdf_preserve_preflight_estimates_panel_output_size(self):
+        estimate = estimate_export_job(
+            widths_mm=[500, 500, 500],
+            height_mm=1000,
+            bleed_mm=0,
+            overlap_mm=0,
+            overlap_mode="shared",
+            dpi=None,
+            color_mode="RGB",
+            export_format="PDF",
+            preserve_vectors=True,
+            source_size_bytes=2_000_000,
+        )
+        self.assertEqual(estimate.panel_count, 3)
+        self.assertGreaterEqual(estimate.estimated_disk_bytes, 6_000_000)
+        self.assertIn("Estimated output space", "\n".join(estimate.summary_lines()))
+
+    def test_preflight_warns_when_combined_jobs_exceed_free_space(self):
+        estimates = [
+            estimate_export_job(
+                widths_mm=[100],
+                height_mm=100,
+                bleed_mm=0,
+                overlap_mm=0,
+                overlap_mode="shared",
+                dpi=None,
+                color_mode="RGB",
+                export_format="PDF",
+                preserve_vectors=True,
+                source_size_bytes=4_000_000,
+            )
+            for _ in range(2)
+        ]
+        estimates = [
+            estimate.__class__(
+                **{
+                    **estimate.__dict__,
+                    "free_disk_bytes": 6_000_000,
+                }
+            )
+            for estimate in estimates
+        ]
+        self.assertIn("Combined batch", combined_disk_space_warning(estimates) or "")
+
+    def test_non_finite_export_numbers_are_rejected(self):
+        common = dict(
+            output_name="test",
+            bleed_mm=0,
+            widths_mm=[100],
+            height_mm=100,
+            overlap_mm=0,
+            overlap_mode="Shared",
+            dpi=150,
+            export_format="PDF",
+            preserve_vectors=False,
+            color_mode="RGB",
+        )
+        cases = {
+            "bleed": {"bleed_mm": float("nan")},
+            "width": {"widths_mm": [float("nan")]},
+            "height": {"height_mm": float("inf")},
+            "overlap": {"overlap_mm": float("nan")},
+        }
+        for name, override in cases.items():
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "finite"):
+                validate_export_values(**{**common, **override})
+
     def test_bigtiff_decision_uses_uncompressed_sample_size(self):
         self.assertFalse(should_use_bigtiff(1000, 1000, 4))
         self.assertTrue(should_use_bigtiff(50_000, 20_000, 4))
+
+    def test_tiff_band_height_shrinks_for_extremely_wide_outputs(self):
+        self.assertEqual(tiff_band_rows(1_000, 4), 256)
+        self.assertLess(tiff_band_rows(1_000_000, 4), 256)
+        self.assertEqual(tiff_band_rows(100_000_000, 4), 1)
 
 
 if __name__ == "__main__":

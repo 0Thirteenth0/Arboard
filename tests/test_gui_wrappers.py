@@ -82,10 +82,10 @@ class GuiWrapperCompatibilityTests(unittest.TestCase):
 
         values = App._validate_profile_for_export(None, profile)
 
-        self.assertEqual(values[5], 72)
-        self.assertEqual(values[6], "pdf")
-        self.assertTrue(values[7])
-        self.assertEqual(values[8], "CMYK")
+        self.assertEqual(values.dpi, 72)
+        self.assertEqual(values.export_format, "pdf")
+        self.assertTrue(values.preserve_vectors)
+        self.assertEqual(values.color_mode, "CMYK")
 
     def test_raster_validation_requires_dpi(self):
         profile = ArtworkProfile(

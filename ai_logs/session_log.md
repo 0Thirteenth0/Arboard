@@ -6,7 +6,21 @@ Track AI-assisted work sessions here.
 
 - Replaced full-frame TIFF rendering with bounded 256-row Deflate strips and automatic BigTIFF selection.
 - Added staged output verification, ICC conversion/assignment, embedded JPG/TIFF profiles, and PDF output intents.
-- Added job/disk preflight, direct panel count, proportional layout templates, expanded export-only presets, retry/resume, and abnormal-shutdown recovery.
+- Added job/disk preflight, direct panel count, expanded export-only presets, retry/resume, and abnormal-shutdown recovery.
+
+## 2026-08-11 - Layout workflow simplification
+
+- Removed Layout Template from the interface because direct panel count, Add Panel, and manual Panel Widths already cover the production workflow more clearly.
+- Removed layout-template persistence and normalization; legacy `layout_templates` keys in existing settings files are ignored safely.
+- Kept export presets intentionally limited to production settings, without artwork dimensions or output folders.
+
+## 2026-08-11 - Full application audit fixes
+
+- Fixed grouped queue removal/Clear crashes and made queue selection/removal changes participate in recovery saves.
+- Fixed cancellation so every unstarted selected job becomes resumable, and normal close-after-cancel removes recovery state.
+- Added finite-number rejection, strict job-file types/page bounds, conservative PDF Preserve sizing, and aggregate disk checks.
+- Added strict requested-ICC verification, PDF Preserve blank-output checks, bounded/cancellable previews, and named export-job records.
+- Centralized release metadata generation, added Windows CI/package self-testing, and advanced the application version to 1.2.0.
 - Added version 1.1.0 release metadata, an Inno Setup definition, optional Authenticode signing, and update-manifest support.
 
 ## 2026-05-19 - Rebuild audit kickoff
@@ -354,3 +368,32 @@ Track AI-assisted work sessions here.
 - Registered the queue container, Treeview, and empty-state label as equivalent file-drop targets.
 - Stopped stripping literal braces after Tcl path parsing, preserving valid filenames such as `{proof}.pdf`.
 - Added a regression test covering all visible queue layers and rebuilt the executable.
+
+## 2026-08-11 - Function-by-function diagnostic and hardening pass
+
+- Inventoried 233 application definitions and reviewed the GUI, persistence, layout, preflight, export, transaction, color, verification, update, and Illustrator-integration subsystems.
+- Fixed stale asynchronous imports reappearing after Clear, case-insensitive queue/path collisions, non-finite preview/panel math, malformed settings/job/update JSON handling, invalid saved window geometry, output-name suffix collisions, and semantic version padding.
+- Fixed Tk callback cleanup on window destruction and preserved compatibility with older in-memory queue keys.
+- Added a commit-time output race check so files created by another process during an export are not overwritten without approval.
+- Made TIFF strip height adaptive to output width so very wide/high-DPI exports retain bounded working memory.
+- Added multi-panel raster-to-TIFF and end-to-end GUI TIFF checks that reopen every output and reject blank/uniform panels.
+- Ran 5,000 randomized panel-layout and seam-resize invariant cases successfully.
+- Final Windows suite passed 114 tests with no failures or skips; compile, dependency, static correctness, and diff checks passed.
+- The first rebuild exposed PyInstaller incorrectly excluding `tkinter`; that binary was rejected after its self-test stalled at startup.
+- Added explicit Tcl/Tk packaging hooks and a build-time Tk initialization gate, rebuilt successfully, and passed the packaged Tk/TkDND/TIFF self-test with exit code 0.
+
+## 2026-08-26 - Illustrator hidden-layer and Explorer job-launch fixes
+
+- Reproduced the supplied Illustrator file's mismatch: source OCGs marked `3D Logo (DO NOT PRINT)` and `bolt + tv + cabinet + cloud` default-hidden, while panel PDFs contained those OCG objects without a catalog-level default configuration.
+- Rebuilt PDF Preserve output layer metadata so each panel retains the source default on/off states.
+- Changed new saved jobs to `.artboard-job`, retained legacy `.artboard-job.json` loading, added startup-path queue loading, and registered the dedicated extension in the Windows installer.
+- Added synthetic hidden-layer, argument parsing, GUI startup loading, and installer association regressions.
+- Released the code and standalone executable as version 1.2.1; all 118 automated tests and the packaged self-test passed.
+- Installed Inno Setup 6.7.3 through WinGet and successfully generated the 1.2.1 Windows setup package with the `.artboard-job` association.
+
+## 2026-08-30 - README refresh and Git delivery
+
+- Rewrote the README for v1.2.1: installer versus standalone use, unsigned distribution, current queue/panel controls, PDF Preserve hidden layers, raster/ICC behavior, job-file compatibility, safety, troubleshooting, and reproducible build commands.
+- Kept the output/assembly screenshots and removed the misleading older application UI screenshot from the guide. No customer artwork was added.
+- Added Git ignores for generated setup binaries and the abandoned local Project OS planning draft; existing local files remain on disk.
+- Prepared the accumulated production-hardening fixes, tests, packaging hooks, workflow, and documentation for the existing `codex/artboard-cutter-production-hardening` branch. No merge into `main` was requested.

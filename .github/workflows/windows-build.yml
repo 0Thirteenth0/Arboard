@@ -1,0 +1,45 @@
+name: Windows build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Generate release metadata
+        run: python tools/generate_version_metadata.py
+
+      - name: Compile and test
+        run: |
+          python -m compileall -q artboard_cutter.py artboard_cutter_gui_advanced.py src tests tools packaging_hooks
+          python -m unittest discover -s tests -q
+
+      - name: Build executable
+        run: python -m PyInstaller --clean --noconfirm ArtboardCutter.spec
+
+      - name: Run packaged self-test
+        shell: powershell
+        run: |
+          $process = Start-Process -FilePath ".\dist\ArtboardCutter.exe" -ArgumentList "--self-test" -PassThru
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw "Packaged self-test timed out after 60 seconds."
+          }
+          if ($process.ExitCode -ne 0) { throw "Packaged self-test failed with exit code $($process.ExitCode)." }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArtboardCutter-Windows
+          path: dist/ArtboardCutter.exe

@@ -22,6 +22,7 @@ MAX_MP = 150
 MAX_RENDER_BYTES = 500_000_000
 MIN_RASTER_DPI = 72
 TIFF_BAND_ROWS = 256
+MAX_TIFF_BAND_BYTES = 64_000_000
 BIGTIFF_THRESHOLD = 3_800_000_000
 
 
@@ -44,6 +45,12 @@ def choose_safe_raster_dpi(panel_sizes_pt, requested_dpi: int, color_mode: str) 
 
 def should_use_bigtiff(width: int, height: int, components: int) -> bool:
     return int(width) * int(height) * int(components) >= BIGTIFF_THRESHOLD
+
+
+def tiff_band_rows(width: int, components: int) -> int:
+    """Choose a strip height that keeps uncompressed TIFF bands near 64 MB or less."""
+    row_bytes = max(1, int(width)) * max(1, int(components))
+    return max(1, min(TIFF_BAND_ROWS, MAX_TIFF_BAND_BYTES // row_bytes))
 
 
 def _pixmap_is_unicolor(pix) -> bool:
@@ -128,6 +135,7 @@ def _write_streaming_tiff(
     components = 4 if output_mode == "CMYK" else 3
     width_px = max(1, int(round((w_t / 72.0) * dpi)))
     height_px = max(1, int(round((h_t / 72.0) * dpi)))
+    band_rows = tiff_band_rows(width_px, components)
     clip_src = fitz.Rect(
         src_rect.x0 + x0_t / sx,
         src_rect.y0,
@@ -141,10 +149,10 @@ def _write_streaming_tiff(
     matrix = fitz.Matrix(sx * dpi / 72.0, sy * dpi / 72.0)
 
     def strips():
-        for row0 in range(0, height_px, TIFF_BAND_ROWS):
+        for row0 in range(0, height_px, band_rows):
             if cancel_check and cancel_check():
                 raise ExportCancelled("Export cancelled.")
-            row1 = min(height_px, row0 + TIFF_BAND_ROWS)
+            row1 = min(height_px, row0 + band_rows)
             y0_t = row0 * 72.0 / dpi
             y1_t = row1 * 72.0 / dpi
             band_clip = fitz.Rect(
@@ -174,7 +182,7 @@ def _write_streaming_tiff(
             planarconfig="contig",
             compression="deflate",
             predictor=False,
-            rowsperstrip=TIFF_BAND_ROWS,
+            rowsperstrip=band_rows,
             resolution=(dpi, dpi),
             resolutionunit="inch",
             iccprofile=color_management.profile_bytes,
@@ -183,7 +191,7 @@ def _write_streaming_tiff(
         )
     if log_cb:
         kind = "BigTIFF" if bigtiff else "TIFF"
-        log_cb(f"[TIFF] streamed in {TIFF_BAND_ROWS}-row bands ({kind}, Deflate)")
+        log_cb(f"[TIFF] streamed in {band_rows}-row bands ({kind}, Deflate)")
     return (width_px, height_px), source_varies
 
 

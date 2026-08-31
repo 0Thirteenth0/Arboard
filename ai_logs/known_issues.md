@@ -47,3 +47,22 @@ These were initial audit risks. Several have since been addressed by the rebuild
 - The reproducible, versioned executable is not digitally signed because no code-signing certificate was supplied.
 - The normal Windows host passed all GUI tests. A restricted sandbox may skip them because it cannot read the host Tcl library.
 - Final production acceptance still requires visual/RIP checks for extreme dimensions, high DPI, BigTIFF, and real large-format jobs.
+
+## 2026-08-11 - Audit closure
+
+- Normal Windows Tk tests now run successfully; sandbox-only Tcl access skips remain environment guards rather than a host-development blocker.
+- Queue deletion, cancellation/resume state, finite numeric validation, recovery cleanup, aggregate disk preflight, preview bounds, requested ICC verification, and PDF Preserve blank-output checks now have regressions.
+- Remaining acceptance work is representative printer/RIP validation for customer artwork, Illustrator-only constructs, spot colors/overprint, and signed distribution when a certificate is available.
+
+## 2026-08-11 - Post-diagnostic residual risk
+
+- No reproducible application defects remain in the automated diagnostic matrix after 114 passing Windows tests.
+- Real Adobe Illustrator COM automation is mocked at its process/timeout/parsing boundaries; final behavior still depends on the installed Illustrator version and document state.
+- Very large TIFF export is streamed with adaptive memory-bounded strips, but final printer/RIP compatibility and multi-gigabyte BigTIFF performance require production hardware and representative artwork.
+- PDF/AI color semantics such as spot colors, overprint, linked assets, and Illustrator-only constructs remain external fidelity checks rather than claims made by the automated suite.
+
+## 2026-08-26 - Resolved reported issues
+
+- PDF Preserve now restores the source PDF/Illustrator default layer visibility instead of allowing imported hidden OCGs to become visible in the output.
+- Windows Explorer launches now load `.artboard-job` files passed to the executable. Existing `.artboard-job.json` files remain compatible through the in-app Load Job action.
+- The installer association takes effect only after installing the rebuilt setup package; running a standalone executable does not register file types by itself.

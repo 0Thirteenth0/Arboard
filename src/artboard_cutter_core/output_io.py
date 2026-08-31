@@ -108,15 +108,19 @@ class StagedOutputSet:
         missing = [path for path in self.stage_paths if not path.exists()]
         if missing:
             raise RuntimeError(f"Export did not create staged output: {missing[0]}")
+        if not self.overwrite:
+            conflicts = [path for path in self.final_paths if path.exists()]
+            if conflicts:
+                raise OutputConflictError(f"Output appeared during export: {conflicts[0]}")
 
         backed_up: list[tuple[Path, Path]] = []
         installed: list[Path] = []
         try:
-            for final, backup in zip(self.final_paths, self._backup_paths):
+            for final, backup in zip(self.final_paths, self._backup_paths, strict=True):
                 if final.exists():
                     final.replace(backup)
                     backed_up.append((final, backup))
-            for stage, final in zip(self.stage_paths, self.final_paths):
+            for stage, final in zip(self.stage_paths, self.final_paths, strict=True):
                 stage.replace(final)
                 installed.append(final)
         except Exception:

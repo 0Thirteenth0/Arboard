@@ -83,6 +83,7 @@ Current source of truth remains `artboard_cutter_gui_advanced.py`, with export/m
 Current structure:
 
 - `artboard_cutter_gui_advanced.py`: tkinter desktop shell, modern layout, preview canvas, file queue, settings controls, export status, activity log.
+- `src/artboard_cutter_core/workflow.py`: typed validated profile values and pending export-job records shared by GUI workflow code.
 - `src/artboard_cutter_core/layout.py`: panel layout source of truth, including outside-only bleed and shared overlap.
 - `src/artboard_cutter_core/export.py`: file-level export orchestration and `ExportOptions`.
 - `src/artboard_cutter_core/raster_export.py`: raster export path.
@@ -318,7 +319,7 @@ card-based production-tool layout:
 - `validation.py` is the shared validation boundary for GUI and engine exports.
 - `output_io.py` centrally builds extensions and stages every panel before atomically replacing an output set. Existing panels are restored if commit fails; stale panels are removed only after success.
 - GUI workers deliver import, preview, and export results through a main-thread event queue; `concurrency.py` serializes PyMuPDF operations.
-- `jobs.py` atomically stores complete queue profiles in versioned `.artboard-job.json` files. Named presets remain in AppData settings.
+- `jobs.py` atomically stores complete queue profiles in versioned `.artboard-job` files and still reads legacy `.artboard-job.json` files. Named presets remain in AppData settings.
 - Raster rendering combines resize and requested DPI in one PyMuPDF matrix. The shared Pillow adapter writes explicit JPG/TIFF files and preserves RGB/CMYK where supported.
 - Rotating runtime logs live under `%LOCALAPPDATA%\ArtboardCutter\logs`, with a temporary-directory fallback.
 
@@ -329,3 +330,17 @@ card-based production-tool layout:
 - Staged verification runs before transactional commit. TIFF uniformity checks decode one strip at a time so verification does not undo the bounded-memory design.
 - ICC handling supports conversion or assignment, embeds profiles in JPG/TIFF, and adds a PDF output intent for raster PDF.
 - A high-resolution unicolor result is compared with a low-resolution render of the same crop. If the low-resolution crop contains artwork, the high-resolution result is treated as MuPDF's silent blank failure and the transactional export is aborted.
+
+## 2026-08-11 - Windows Tcl/Tk packaging
+
+- `packaging_hooks/` overrides PyInstaller's false-negative Tk detection for the standalone Python 3.14 Windows layout.
+- The custom hooks collect `_tkinter.pyd`, Tcl/Tk DLLs, and the Tcl/Tk data trees, then point the one-file runtime at `_tcl_data` and `_tk_data`.
+- `build_exe.bat` refuses to build if Tk cannot initialize in the build environment.
+- The packaged `--self-test` initializes Tk/TkDND before exercising streamed TIFF output, so a release cannot pass while its GUI runtime is missing.
+
+## 2026-08-26 - PDF layer state and Windows document launch
+
+- PDF Preserve captures the source default optional-content configuration before panel generation and reconstructs `/OCProperties` after PyMuPDF imports the layer objects into each output document.
+- Layer state matching uses the imported OCG names and stable occurrence order, preserving source default-hidden layers without flattening vector content.
+- The GUI accepts a startup job path, delays loading until Tk initialization is complete, and suppresses the competing crash-recovery prompt for that launch.
+- `.artboard-job` is the dedicated Windows document extension. The installer registers its icon and quoted open command; legacy compound `.artboard-job.json` files remain readable only through the in-app loader so Artboard Cutter never claims all JSON files.

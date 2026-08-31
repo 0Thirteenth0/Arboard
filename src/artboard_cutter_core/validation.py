@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .modes import is_pdf_preserve_mode
@@ -51,6 +52,14 @@ def validate_export_values(
     if fmt == "tiff":
         fmt = "tif"
 
+    if not math.isfinite(bleed):
+        raise ValueError("Bleed must be a finite number.")
+    if any(not math.isfinite(width) for width in widths):
+        raise ValueError("Panel widths must contain only finite numbers.")
+    if not math.isfinite(height):
+        raise ValueError("Height must be a finite number.")
+    if not math.isfinite(overlap):
+        raise ValueError("Overlap must be a finite number.")
     if bleed < 0:
         raise ValueError("Bleed must be 0 or greater.")
     if not widths or any(width <= 0 for width in widths):

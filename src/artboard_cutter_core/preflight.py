@@ -32,6 +32,8 @@ class ExportEstimate:
             lines.append(f"Largest panel: {self.largest_panel_pixels / 1e6:.1f} MP")
             lines.append(f"Raw image data: {format_bytes(self.estimated_raw_bytes)}")
             lines.append(f"Estimated output space: {format_bytes(self.estimated_disk_bytes)}")
+        elif self.estimated_disk_bytes:
+            lines.append(f"Estimated output space: {format_bytes(self.estimated_disk_bytes)}")
         if self.uses_streaming_tiff:
             lines.append(f"TIFF writer: streamed {'BigTIFF' if self.uses_bigtiff else 'TIFF'}")
         if self.free_disk_bytes is not None:
@@ -49,6 +51,21 @@ def format_bytes(value: int) -> str:
     return f"{size:.1f} TB"
 
 
+def combined_disk_space_warning(estimates: list[ExportEstimate]) -> str | None:
+    """Return a batch-level warning when individually safe jobs exceed free space together."""
+    total_disk = sum(estimate.estimated_disk_bytes for estimate in estimates)
+    free_values = [estimate.free_disk_bytes for estimate in estimates if estimate.free_disk_bytes is not None]
+    if not free_values:
+        return None
+    free_disk = min(free_values)
+    if total_disk * 1.2 <= free_disk:
+        return None
+    return (
+        f"Combined batch may exceed available disk space ({format_bytes(total_disk)} estimated / "
+        f"{format_bytes(free_disk)} free)."
+    )
+
+
 def estimate_export_job(
     *,
     widths_mm: list[float],
@@ -61,6 +78,7 @@ def estimate_export_job(
     export_format: str,
     preserve_vectors: bool,
     output_root: Path | None = None,
+    source_size_bytes: int | None = None,
 ) -> ExportEstimate:
     layout, _, _ = compute_panel_layout(widths_mm, bleed_mm, overlap_mm, overlap_mode)
     free = None
@@ -70,7 +88,17 @@ def estimate_export_job(
         except Exception:
             pass
     if preserve_vectors:
-        return ExportEstimate(len(layout), None, None, 0, 0, 0, False, False, free, ())
+        warnings = []
+        if source_size_bytes is None:
+            disk = 0
+            warnings.append("PDF Preserve output size could not be estimated from the source file.")
+        else:
+            # Each single-panel PDF may import the source page resources. This
+            # intentionally favors a conservative estimate for disk safety.
+            disk = int(max(0, source_size_bytes) * max(1, len(layout)) * 1.1)
+        if free is not None and disk * 1.2 > free:
+            warnings.append("Estimated output may exceed available disk space.")
+        return ExportEstimate(len(layout), None, None, 0, 0, disk, False, False, free, tuple(warnings))
 
     requested = int(dpi or 0)
     height_pt = mm_to_pt(height_mm + 2 * bleed_mm)
