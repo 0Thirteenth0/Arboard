@@ -1255,7 +1255,13 @@ class App(BaseTk):
             "About Artboard Cutter",
             f"Artboard Cutter {APP_VERSION}\n\n"
             "Production artwork panel export with streamed TIFF, PDF Preserve, ICC color management, "
-            "staged verification, job recovery, and reusable export presets.",
+            "staged verification, job recovery, and reusable export presets.\n\n"
+            "Copyright (C) 2026 Artboard Cutter contributors\n"
+            "Licensed under GNU AGPLv3. You may redistribute and modify this program "
+            "under that license. This program comes with NO WARRANTY.\n\n"
+            "License: https://www.gnu.org/licenses/agpl-3.0.html\n"
+            "Source and notices: https://github.com/0Thirteenth0/Arboard\n"
+            "See LICENSE and THIRD_PARTY_NOTICES.md in the release downloads.",
         )
 
     # ---------- Theme ----------

@@ -25,6 +25,8 @@ if errorlevel 1 (
 if errorlevel 1 exit /b 1
 .venv\Scripts\python.exe tools\generate_version_metadata.py
 if errorlevel 1 exit /b 1
+.venv\Scripts\python.exe tools\collect_licenses.py
+if errorlevel 1 exit /b 1
 
 echo [4/5] Building executable...
 .venv\Scripts\python.exe -m PyInstaller --clean --noconfirm ArtboardCutter.spec

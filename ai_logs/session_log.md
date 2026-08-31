@@ -397,3 +397,14 @@ Track AI-assisted work sessions here.
 - Kept the output/assembly screenshots and removed the misleading older application UI screenshot from the guide. No customer artwork was added.
 - Added Git ignores for generated setup binaries and the abandoned local Project OS planning draft; existing local files remain on disk.
 - Prepared the accumulated production-hardening fixes, tests, packaging hooks, workflow, and documentation for the existing `codex/artboard-cutter-production-hardening` branch. No merge into `main` was requested.
+
+## 2026-08-31 - AGPLv3 release preparation
+
+- Added the user-approved AGPLv3 license, copyright/warranty notice, dependency-source guide,
+  and About-dialog notices. No commercial licensing or signing was purchased.
+- Added a build-time notice collector, installer license display/files, and matching CI collection.
+- Added four regression tests for license collection and installer/executable packaging.
+- Prepared first-release notes, download links, maintainer instructions, and source-archive provenance.
+- Built the unsigned Windows standalone executable and Inno installer with full notices.
+- Verified all 122 Windows tests, dependency consistency, compilation, and the packaged Tk/TkDND/TIFF self-test.
+- Kept clean-machine installation/uninstallation and production print/RIP proof as explicitly unverified.

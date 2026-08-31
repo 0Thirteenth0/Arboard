@@ -268,3 +268,11 @@ Track product and implementation decisions here.
 - The user chose to skip code signing. Keep unsigned standalone/installer builds and document Windows publisher warnings; do not enroll in a paid signing service.
 - Retain the optional certificate-based build switch for a future explicitly requested signing workflow, but use an empty certificate argument for the documented unsigned build.
 - Keep executable/installer build products out of Git; binary release publishing is separate from committing source changes.
+
+## 2026-08-31 - First public release licensing
+
+- The owner explicitly approved licensing Artboard Cutter under GNU AGPLv3, version 3 only.
+- Keep Windows binaries unsigned; do not purchase a certificate or commercial PyMuPDF license.
+- Use GitHub Releases for installer/standalone downloads. GitHub Packages is not needed.
+- Publish license notices, exact application source, official PyMuPDF and MuPDF source archives,
+  and SHA-256 checksums alongside the binaries. Do not add local artwork or job files.

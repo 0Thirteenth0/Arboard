@@ -1,0 +1,18 @@
+Artboard Cutter
+Copyright (C) 2026 Artboard Cutter contributors
+
+Artboard Cutter is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License, version 3,
+as published by the Free Software Foundation (SPDX: AGPL-3.0-only).
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the accompanying LICENSE for details.
+
+Source code, build instructions, notices, and release downloads:
+https://github.com/0Thirteenth0/Arboard
+https://github.com/0Thirteenth0/Arboard/releases/tag/v1.2.1
+
+Third-party components retain their own copyrights and license notices.
+See THIRD_PARTY_NOTICES.md and the licenses directory supplied with the release.
+Input artwork and exported artwork are not relicensed by using this program.

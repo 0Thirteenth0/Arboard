@@ -492,3 +492,16 @@ Results:
 - Checked all 19 README links/anchors, including the three screenshot files; the documented 3-panel bleed/overlap example matched the layout engine.
 - Scanned the intended source/documentation paths for common private-key and token patterns; no matches. Generated installers, local artwork, runtime logs, and the abandoned planning draft are excluded from the commit.
 - Scope: code/documentation commit and branch push, not a new binary build, installer deployment, or new printer/RIP acceptance test.
+
+## 2026-08-31 - Public release packaging checks
+
+- Full Windows suite after release changes: 122 tests passed, 0 failures, 0 skips (9.110 seconds).
+- New release-license regression file: 4 tests passed; first run failed as expected before the collector existed.
+- `compileall`, `pip check`, and `git diff --check`: passed (only Git line-ending notices).
+- Fresh PyInstaller and Inno Setup builds: successful; both executables report version 1.2.1 and are unsigned.
+- Packaged Tk/TkDND/TIFF self-test: exit 0. Embedded LICENSE, NOTICE, and third-party guide matched source.
+- Executable archive contains 112 dependency/runtime notice entries. Its third-party Python module roots
+  match the dependency set covered by the collector.
+- PyMuPDF source archive matches the PyPI SHA-256. Separate MuPDF source archive has 8,689 entries,
+  including 7,170 third-party entries and 2,024 C/C++ source entries.
+- Not performed: clean-machine install/uninstall and production print/RIP proof.

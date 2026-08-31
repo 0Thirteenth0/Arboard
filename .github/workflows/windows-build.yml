@@ -19,7 +19,9 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
 
       - name: Generate release metadata
-        run: python tools/generate_version_metadata.py
+        run: |
+          python tools/generate_version_metadata.py
+          python tools/collect_licenses.py
 
       - name: Compile and test
         run: |
@@ -32,7 +34,7 @@ jobs:
       - name: Run packaged self-test
         shell: powershell
         run: |
-          $process = Start-Process -FilePath ".\dist\ArtboardCutter.exe" -ArgumentList "--self-test" -PassThru
+          $process = Start-Process -FilePath ".\dist\ArtboardCutter.exe" -ArgumentList "--self-test" -WindowStyle Hidden -PassThru
           if (-not $process.WaitForExit(60000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             throw "Packaged self-test timed out after 60 seconds."

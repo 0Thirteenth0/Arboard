@@ -2,7 +2,13 @@
 
 Windows desktop tool for resizing large-format artwork and cutting it into numbered print panels, with outside bleed and repeated artwork at panel seams.
 
-**Version 1.2.1 · Windows x64 · Unsigned distribution**
+**Version 1.2.1 · Windows x64 · AGPLv3 · Unsigned distribution**
+
+**[Download the latest Windows release](https://github.com/0Thirteenth0/Arboard/releases/latest)**
+
+Choose `ArtboardCutter-1.2.1-Setup.exe` for installation or `ArtboardCutter.exe` for
+standalone use. Release assets also include license notices, corresponding source,
+and `SHA256SUMS.txt` for verifying downloads.
 
 Import PDF, PDF-compatible Adobe Illustrator files, JPG, PNG, or TIFF. Export vector-preserving PDF panels or raster PDF/JPG/TIFF panels. Artwork is processed locally; Illustrator is not required for ordinary import, preview, or export.
 
@@ -19,16 +25,17 @@ Import PDF, PDF-compatible Adobe Illustrator files, JPG, PNG, or TIFF. Export ve
 - [Troubleshooting and limitations](#troubleshooting-and-limitations)
 - [Development and builds](#development-and-builds)
 - [Recent changes](#recent-changes)
+- [License and source](#license-and-source)
 
 ## Install and run
 
 ### Windows installer
 
-Run `ArtboardCutter-1.2.1-Setup.exe` when supplied by the maintainer, or [build it from source](#build-the-installer). Setup installs the application, adds a Start menu shortcut, optionally adds a desktop shortcut, and registers `.artboard-job` files for opening with Artboard Cutter. Installation requests administrator permission.
+Download and run `ArtboardCutter-1.2.1-Setup.exe` from [Releases](https://github.com/0Thirteenth0/Arboard/releases/latest), or [build it from source](#build-the-installer). Setup installs the application, license notices, a Start menu shortcut, an optional desktop shortcut, and the `.artboard-job` file association. Installation requests administrator permission.
 
 ### Standalone executable
 
-Run `ArtboardCutter.exe` directly. The packaged application includes Python, Tcl/Tk, and its runtime dependencies; Python does not need to be installed separately. The standalone executable does not register Windows file associations by itself.
+Download `ArtboardCutter.exe` and the accompanying `ArtboardCutter-1.2.1-Licenses.zip` from the release page. Extract the notices beside the executable and run it directly. The packaged application includes Python, Tcl/Tk, and its runtime dependencies; Python does not need to be installed separately. The standalone executable does not register Windows file associations by itself.
 
 Both distribution formats are intentionally **unsigned**. Windows may display an unknown-publisher or SmartScreen warning. Only run a build from a source you trust, and follow any company security policy. Signing is not required for the application to work.
 
@@ -216,7 +223,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip check
 ```
 
-The v1.2.1 suite contains 118 tests covering geometry, export formats, TIFF content, hidden layers, settings/jobs, startup loading, transactional writes, queue lifecycle, and themes. GUI tests can skip if the host cannot initialize Tk or capture a desktop. See [testing notes](docs/testing.md) for manual integration checks and [recorded results](ai_logs/test_results.md) for dated evidence.
+The v1.2.1 suite contains 122 tests covering geometry, export formats, TIFF content, hidden layers, settings/jobs, startup loading, transactional writes, queue lifecycle, themes, and release-license packaging. GUI tests can skip if the host cannot initialize Tk or capture a desktop. See [testing notes](docs/testing.md) for manual integration checks and [recorded results](ai_logs/test_results.md) for dated evidence.
 
 ### Build the standalone executable
 
@@ -286,3 +293,19 @@ tools/                            Build and metadata utilities
 - Bundle Tcl/Tk explicitly and test the packaged runtime before distribution.
 
 See [development decisions](ai_logs/decisions.md) and the [session log](ai_logs/session_log.md) for the implementation history.
+
+## License and source
+
+Artboard Cutter is free software under **GNU AGPLv3 (AGPL-3.0-only)**, with no
+warranty. See [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[third-party notices and source locations](THIRD_PARTY_NOTICES.md).
+This license covers the program, not your imported/exported artwork.
+
+The release page provides the exact application source and build scripts, plus
+the PyMuPDF/MuPDF source distribution, in `ArtboardCutter-1.2.1-Source.zip`.
+The ordinary GitHub source-code ZIP contains only this repository.
+License texts for bundled components are included with the installer and in
+`ArtboardCutter-1.2.1-Licenses.zip`. **About** in the application also identifies
+the license, warranty disclaimer, and source location.
+
+See [release packaging notes](docs/releasing.md) for artifact contents and checks.
